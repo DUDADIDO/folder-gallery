@@ -11,13 +11,17 @@ concurrency:
 
 jobs:
   ipa:
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - name: Xcode version
-        run: xcodebuild -version
+      - name: Pick newest Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          NEWEST=$(ls -d /Applications/Xcode_[0-9]*.app | grep -vi beta | sort -V | tail -1)
+          if [ -n "$NEWEST" ]; then sudo xcode-select -s "$NEWEST"; fi
+          xcodebuild -version
 
       - name: Generate project
         run: |

@@ -492,8 +492,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
         // 옆으로 끌어 선택하는 동안 '밀어서 뒤로'가 잡히지 않게
         navigationController?.interactivePopGestureRecognizer?.isEnabled = !on
-        if #available(iOS 26.0, *) {
-            navigationController?.interactiveContentPopGestureRecognizer?.isEnabled = !on
+        // iOS 26 의 '화면 어디서나 밀어서 뒤로'. 예전 SDK 로도 빌드되게 이름으로 찾음
+        let contentPop = NSSelectorFromString("interactiveContentPopGestureRecognizer")
+        if let nav = navigationController, nav.responds(to: contentPop),
+           let recognizer = nav.perform(contentPop)?.takeUnretainedValue() as? UIGestureRecognizer {
+            recognizer.isEnabled = !on
         }
         navigationController?.setToolbarHidden(!on, animated: true)
         updateChrome()
