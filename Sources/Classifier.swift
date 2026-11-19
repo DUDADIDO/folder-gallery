@@ -29,56 +29,50 @@ enum ImportProbe {
         return d
     }()
     private static let running = dir.appendingPathComponent("probe-running")
-    private static let failed = dir.appendingPathComponent("probe-failed")
-    private static let provenKey = "probeProven"
-    /// 이만큼 문제없이 읽고 나면 표시 파일 없이 읽음
-    private static let provenTarget = 300
-    private static var proven = UserDefaults.standard.integer(forKey: provenKey)
+    private static let strikesKey = "probeStrikes"
+    /// 분류 묶음이 이만큼 연달아 끝나지 못하면(앱이 죽었으면) 끔. 한 번은 그냥 앱을 끈 것일 수 있음
+    private static let maxStrikes = 2
     private static var marked = false
     private(set) static var hits = 0
 
-    /// 지난번에 읽다가 죽었으면(표시 파일이 남아 있으면) 끔
     private(set) static var usable: Bool = {
         let fm = FileManager.default
+        let defaults = UserDefaults.standard
         if fm.fileExists(atPath: running.path) {
-            fm.createFile(atPath: failed.path, contents: nil)
+            defaults.set(defaults.integer(forKey: strikesKey) + 1, forKey: strikesKey)
             try? fm.removeItem(at: running)
         }
-        return !fm.fileExists(atPath: failed.path)
+        return defaults.integer(forKey: strikesKey) < maxStrikes
     }()
 
-    static var state: String { usable ? "on(hits \(hits), proven \(proven))" : "off(crashed before)" }
+    static var state: String {
+        let strikes = UserDefaults.standard.integer(forKey: strikesKey)
+        return usable ? "on(hits \(hits), strikes \(strikes))" : "off(strikes \(strikes))"
+    }
 
-    /// 분류 묶음이 끝날 때: 표시 파일을 지우고 지금까지 문제없이 읽은 수를 저장
+    /// 분류 묶음이 무사히 끝났을 때
     static func endBatch() {
         if marked {
             marked = false
             try? FileManager.default.removeItem(at: running)
-            UserDefaults.standard.set(proven, forKey: provenKey)
+            UserDefaults.standard.set(0, forKey: strikesKey)
         }
     }
 
     /// '사진 다시 분류' 때 다시 시도
     static func reenable() {
-        try? FileManager.default.removeItem(at: failed)
         try? FileManager.default.removeItem(at: running)
         marked = false
-        proven = 0
-        UserDefaults.standard.set(0, forKey: provenKey)
+        UserDefaults.standard.set(0, forKey: strikesKey)
         usable = true
     }
 
     /// 분류 줄(직렬)에서만 부름
     static func read(_ asset: PHAsset) -> (by: Int?, bundle: String?, name: String?)? {
         guard usable else { return nil }
-        if proven < provenTarget {
-            if !marked {
-                marked = true
-                FileManager.default.createFile(atPath: running.path, contents: nil)
-            }
-            proven += 1
-        } else if marked {
-            endBatch()
+        if !marked {
+            marked = true
+            FileManager.default.createFile(atPath: running.path, contents: nil)
         }
 
         let sel = NSSelectorFromString("importProperties")
@@ -148,7 +142,8 @@ final class Classifier {
 
     func enqueue(_ assets: [PHAsset]) {
         lock.lock()
-        let fresh = assets.filter { queued.insert($0.localIdentifier).inserted }
+        // 이미 분류했거나 줄 서 있는 건 뺌
+        let fresh = assets.filter { cache[$0.localIdentifier] == nil && queued.insert($0.localIdentifier).inserted }
         lock.unlock()
         guard !fresh.isEmpty else { return }
         queue.async { self.process(fresh) }

@@ -361,6 +361,11 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         return header
     }
 
+    func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        guard indexPath.item < folders.count, let cell = cell as? FolderCell else { return }
+        cell.countLabel.text = String(Library.shared.snapshot.items[folders[indexPath.item].id]?.count ?? 0)
+    }
+
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
         guard indexPath.item < folders.count else { return }

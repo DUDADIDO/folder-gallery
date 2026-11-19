@@ -1,3 +1,4 @@
+import AVFoundation
 import AVKit
 import CoreLocation
 import Photos
@@ -13,6 +14,7 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
     private let playButton = UIButton(type: .system)
     private var requestID: PHImageRequestID = PHInvalidImageRequestID
     private var loadedSize: CGSize = .zero
+    private var loadingVideo = false
 
     /// 확대해서 보는 중인지 (이때는 아래로 쓸어 닫기를 안 함)
     var isZoomed: Bool { scrollView.zoomScale > 1.01 }
@@ -132,12 +134,18 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
     }
 
     @objc private func play() {
+        guard !loadingVideo else { return }
+        loadingVideo = true
+        // 무음 스위치가 켜져 있어도 영상 소리가 나게
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         let options = PHVideoRequestOptions()
         options.isNetworkAccessAllowed = true
         options.deliveryMode = .automatic
         PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { [weak self] item, _ in
             DispatchQueue.main.async {
-                guard let self, let item else { return }
+                guard let self else { return }
+                self.loadingVideo = false
+                guard let item, self.presentedViewController == nil else { return }
                 let player = AVPlayerViewController()
                 player.player = AVPlayer(playerItem: item)
                 self.present(player, animated: true) {
@@ -161,7 +169,8 @@ final class VerticalPanGate: NSObject, UIGestureRecognizerDelegate {
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        true
+        // 확대(두 손가락)와는 같이 잡히지 않게
+        !(otherGestureRecognizer is UIPinchGestureRecognizer)
     }
 }
 
@@ -172,6 +181,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     private let sourceAlbumID: String?
     private var chromeHidden = false
     private let panGate = VerticalPanGate()
+    private weak var pannedView: UIView?   // 쓸기 시작할 때 잡은 사진 화면
 
     private lazy var shareItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: self, action: #selector(shareCurrent))
     private lazy var favoriteItem = UIBarButtonItem(image: UIImage(systemName: "heart"), style: .plain, target: self, action: #selector(toggleFavorite))
@@ -216,6 +226,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             return !page.isZoomed
         }
         pan.delegate = panGate
+        pan.maximumNumberOfTouches = 1
         view.addGestureRecognizer(pan)
 
         updateTitle()
@@ -226,6 +237,15 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         // 영상 재생 화면에서 돌아올 때도 숨김 상태를 그대로
         navigationController?.setNavigationBarHidden(chromeHidden, animated: animated)
         navigationController?.setToolbarHidden(chromeHidden, animated: animated)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // 닫다가 취소했을 때 남은 변형을 지움
+        if let pageView = pannedView {
+            pageView.transform = .identity
+            pageView.alpha = 1
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -273,10 +293,17 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     // MARK: - 쓸기 (아래: 닫기, 위: 정보)
 
     @objc private func panned(_ gesture: UIPanGestureRecognizer) {
-        guard let pageView = viewControllers?.first?.view else { return }
+        if gesture.state == .began {
+            pannedView = viewControllers?.first?.view
+        }
+        guard let pageView = pannedView else { return }
         let move = gesture.translation(in: view)
         switch gesture.state {
         case .changed:
+            if let page = viewControllers?.first as? AssetPageViewController, page.isZoomed {
+                restore(pageView)   // 쓸다가 확대가 시작되면 그만둠
+                return
+            }
             if move.y > 0 {
                 // 사진이 손가락을 따라 내려가며 조금 작아짐
                 let progress = min(1, move.y / 320)
@@ -335,10 +362,12 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         updateTitle()
     }
 
-    /// 지금 보던 사진이 목록에서 빠졌을 때 (지움·옮김)
-    private func removeCurrent() {
-        guard let index = currentIndex else { return }
+    /// 사진이 목록에서 빠졌을 때 (지움·옮김). 그사이 다른 사진으로 넘겼으면 보던 사진은 그대로
+    private func remove(id: String) {
+        guard let index = assets.firstIndex(where: { $0.localIdentifier == id }) else { return }
+        let wasCurrent = id == currentID
         assets.remove(at: index)
+        guard wasCurrent else { return }
         if assets.isEmpty {
             navigationController?.popViewController(animated: true)
             return
@@ -380,16 +409,18 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     private func sendCurrent(copy: Bool) {
         guard let asset = currentAsset else { return }
+        let id = asset.localIdentifier
         Mover.present(from: self, assets: [asset], sourceAlbumID: sourceAlbumID, copy: copy) { [weak self] ok in
             // 내 앨범에서 다른 앨범으로 이동하면 이 앨범에서는 빠짐
-            if ok, !copy, self?.sourceAlbumID != nil { self?.removeCurrent() }
+            if ok, !copy, self?.sourceAlbumID != nil { self?.remove(id: id) }
         }
     }
 
     @objc private func deleteCurrent() {
         guard let asset = currentAsset else { return }
+        let id = asset.localIdentifier
         Library.shared.delete([asset]) { [weak self] ok in
-            if ok { self?.removeCurrent() }
+            if ok { self?.remove(id: id) }
         }
     }
 

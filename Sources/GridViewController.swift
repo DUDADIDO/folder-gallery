@@ -141,6 +141,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private var selecting = false
     private var thumbSize = CGSize(width: 240, height: 240)
     private let isRoot: Bool
+    private var selectedPerSection: [Int: Int] = [:]
     private let columnChoices = [3, 4, 5, 7]
     private var columns = 4
 
@@ -193,6 +194,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         emptyLabel.text = "사진이 없어요"
         emptyLabel.textColor = .secondaryLabel
         emptyLabel.textAlignment = .center
+        emptyLabel.numberOfLines = 0
         emptyLabel.font = .systemFont(ofSize: 16)
 
         let press = UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:)))
@@ -212,8 +214,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let scale = traitCollection.displayScale
-        // 칸 수를 바꿔도 다시 받지 않게 가장 큰 칸(3칸) 기준
-        let side = max(60, view.bounds.width / 3) * scale
+        let side = max(40, view.bounds.width / CGFloat(columns)) * scale
         thumbSize = CGSize(width: side, height: side)
     }
 
@@ -223,8 +224,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         navigationController?.setToolbarHidden(!selecting, animated: animated)
     }
 
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
         if selecting { setSelecting(false) }
     }
 
@@ -237,9 +238,18 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             next = min(columnChoices.count - 1, index + 1)   // 오므리면 작게
         }
         guard next != index else { return }
+        // 보고 있던 자리를 기억했다가 칸 수를 바꾼 뒤 그 사진으로 돌아감
+        let anchor = collectionView.indexPathForItem(at: gesture.location(in: collectionView))
+            ?? collectionView.indexPathsForVisibleItems.min()
         columns = columnChoices[next]
         Prefs.gridColumns = columns
-        collectionView.setCollectionViewLayout(makeLayout(), animated: true)
+        Thumbs.manager.stopCachingImagesForAllAssets()
+        view.setNeedsLayout()
+        collectionView.setCollectionViewLayout(makeLayout(), animated: false)
+        collectionView.layoutIfNeeded()
+        if let anchor, anchor.section < sections.count, anchor.item < sections[anchor.section].range.count {
+            collectionView.scrollToItem(at: anchor, at: .centeredVertically, animated: false)
+        }
     }
 
     private func makeLayout() -> UICollectionViewLayout {
@@ -282,14 +292,23 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
         let new = snapshot.items[folder.id] ?? []
         let newIDs = new.map(\.localIdentifier)
-        if !force && newIDs == assetIDs { return }
+        if !force && newIDs == assetIDs {
+            assets = new   // 순서는 같아도 즐겨찾기·편집 상태가 바뀐 새 값으로
+            return
+        }
 
         let keep = Set(selectedAssets().map(\.localIdentifier))
         assets = new
         assetIDs = newIDs
         buildSections()
         collectionView.reloadData()
-        collectionView.backgroundView = assets.isEmpty ? emptyLabel : nil
+        if !Library.shared.canRead {
+            emptyLabel.text = "사진 접근 권한이 필요해요.\n앨범 탭에서 설정을 열 수 있어요."
+            collectionView.backgroundView = emptyLabel
+        } else {
+            emptyLabel.text = "사진이 없어요"
+            collectionView.backgroundView = (assets.isEmpty && snapshot.loaded) ? emptyLabel : nil
+        }
 
         if selecting && !keep.isEmpty {
             for (s, section) in sections.enumerated() {
@@ -306,8 +325,14 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         var result: [(day: Date, range: Range<Int>)] = []
         var start = 0
         var current: Date?
+        var dayEnd = Date.distantPast   // current 날의 끝. 최신순이라 같은 날이 이어서 나옴
         for (index, asset) in assets.enumerated() {
-            let day = calendar.startOfDay(for: asset.creationDate ?? .distantPast)
+            let date = asset.creationDate ?? .distantPast
+            var day = current ?? .distantFuture
+            if current == nil || date < day || date >= dayEnd {
+                day = calendar.startOfDay(for: date)
+                dayEnd = calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86400)
+            }
             if day != current {
                 if let current { result.append((current, start..<index)) }
                 current = day
@@ -429,7 +454,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 옆으로 끌어서 여러 장 선택 (iOS 기본 동작, 화면 끝에서 자동 스크롤)
     func collectionView(_ collectionView: UICollectionView, shouldBeginMultipleSelectionInteractionAt indexPath: IndexPath) -> Bool {
-        true
+        selecting   // 길게 누르거나 '선택'으로 들어온 뒤에만. 아니면 두 손가락 벌리기가 선택으로 잡힘
     }
 
     func collectionView(_ collectionView: UICollectionView, didBeginMultipleSelectionInteractionAt indexPath: IndexPath) {
@@ -465,6 +490,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if isRoot, #available(iOS 18.0, *) {
             tabBarController?.setTabBarHidden(on, animated: true)
         }
+        // 옆으로 끌어 선택하는 동안 '밀어서 뒤로'가 잡히지 않게
+        navigationController?.interactivePopGestureRecognizer?.isEnabled = !on
+        if #available(iOS 26.0, *) {
+            navigationController?.interactiveContentPopGestureRecognizer?.isEnabled = !on
+        }
         navigationController?.setToolbarHidden(!on, animated: true)
         updateChrome()
     }
@@ -496,8 +526,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func isSectionFullySelected(_ section: Int) -> Bool {
         guard selecting, section < sections.count else { return false }
         let count = sections[section].range.count
-        let selected = (collectionView.indexPathsForSelectedItems ?? []).filter { $0.section == section }.count
-        return count > 0 && selected == count
+        return count > 0 && (selectedPerSection[section] ?? 0) == count
     }
 
     private func toggleSection(_ section: Int) {
@@ -517,9 +546,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 제목·버튼을 지금 상태에 맞춤
     private func updateChrome() {
         guard isViewLoaded else { return }
+        // 선택 목록은 한 번만 읽어서 날짜별 개수를 세어 둠 (머리글마다 다시 세지 않게)
+        let selectedPaths = selecting ? (collectionView.indexPathsForSelectedItems ?? []) : []
+        var perSection: [Int: Int] = [:]
+        for path in selectedPaths {
+            perSection[path.section, default: 0] += 1
+        }
+        selectedPerSection = perSection
         if selecting {
-            let count = collectionView.indexPathsForSelectedItems?.count ?? 0
-            title = count == 0 ? "항목 선택" : "\(count)장 선택"
+            let count = selectedPaths.count
+            navigationItem.title = count == 0 ? "항목 선택" : "\(count)장 선택"
             navigationItem.hidesBackButton = true
             navigationItem.leftBarButtonItem = UIBarButtonItem(title: "취소", style: .plain, target: self, action: #selector(cancelSelecting))
             let allSelected = count == assets.count && count > 0
@@ -529,7 +565,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 item.isEnabled = count > 0
             }
         } else {
-            title = folder.title
+            navigationItem.title = folder.title
             navigationItem.hidesBackButton = false
             navigationItem.leftBarButtonItem = nil
             let select = UIBarButtonItem(title: "선택", style: .plain, target: self, action: #selector(startSelecting))
