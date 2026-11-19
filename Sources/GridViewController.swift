@@ -140,10 +140,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private let emptyLabel = UILabel()
     private var selecting = false
     private var thumbSize = CGSize(width: 240, height: 240)
-    private let columns = 4
+    private let isRoot: Bool
+    private let columnChoices = [3, 4, 5, 7]
+    private var columns = 4
 
     private lazy var shareItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: self, action: #selector(shareSelected))
-    private lazy var moveItem = UIBarButtonItem(image: UIImage(systemName: "folder"), style: .plain, target: self, action: #selector(moveSelected))
+    private lazy var moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeMoreMenu())
     private lazy var deleteItem = UIBarButtonItem(image: UIImage(systemName: "trash"), style: .plain, target: self, action: #selector(deleteSelected))
 
     private let dayFormatter: DateFormatter = {
@@ -155,9 +157,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         return formatter
     }()
 
-    init(folder: Folder) {
+    init(folder: Folder, isRoot: Bool = false) {
         self.folder = folder
+        self.isRoot = isRoot
         super.init(nibName: nil, bundle: nil)
+        hidesBottomBarWhenPushed = !isRoot
+        let saved = Prefs.gridColumns
+        columns = columnChoices.contains(saved) ? saved : 4
     }
 
     required init?(coder: NSCoder) {
@@ -167,7 +173,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
-        navigationItem.largeTitleDisplayMode = .never
+        navigationItem.largeTitleDisplayMode = isRoot ? .always : .never
 
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: makeLayout())
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -193,7 +199,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         press.minimumPressDuration = 0.35
         collectionView.addGestureRecognizer(press)
 
-        toolbarItems = [shareItem, UIBarButtonItem.flexibleSpace(), moveItem, UIBarButtonItem.flexibleSpace(), deleteItem]
+        // 두 손가락으로 벌리고 오므려 칸 수 바꾸기
+        collectionView.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:))))
+
+        toolbarItems = [shareItem, UIBarButtonItem.flexibleSpace(), moreItem, UIBarButtonItem.flexibleSpace(), deleteItem]
 
         NotificationCenter.default.addObserver(self, selector: #selector(libraryChanged), name: Library.didChange, object: nil)
         reloadFromLibrary(force: true)
@@ -203,7 +212,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let scale = traitCollection.displayScale
-        let side = max(60, view.bounds.width / CGFloat(columns)) * scale
+        // 칸 수를 바꿔도 다시 받지 않게 가장 큰 칸(3칸) 기준
+        let side = max(60, view.bounds.width / 3) * scale
         thumbSize = CGSize(width: side, height: side)
     }
 
@@ -218,22 +228,41 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if selecting { setSelecting(false) }
     }
 
+    @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
+        guard gesture.state == .ended, let index = columnChoices.firstIndex(of: columns) else { return }
+        var next = index
+        if gesture.scale > 1.25 {
+            next = max(0, index - 1)                         // 벌리면 크게
+        } else if gesture.scale < 0.8 {
+            next = min(columnChoices.count - 1, index + 1)   // 오므리면 작게
+        }
+        guard next != index else { return }
+        columns = columnChoices[next]
+        Prefs.gridColumns = columns
+        collectionView.setCollectionViewLayout(makeLayout(), animated: true)
+    }
+
     private func makeLayout() -> UICollectionViewLayout {
-        let spacing: CGFloat = 2
-        let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(widthDimension: .fractionalWidth(1),
-                                                                             heightDimension: .fractionalHeight(1)))
-        let groupSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1),
-                                               heightDimension: .fractionalWidth(1 / CGFloat(columns)))
-        let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize, repeatingSubitem: item, count: columns)
-        group.interItemSpacing = .fixed(spacing)
-        let section = NSCollectionLayoutSection(group: group)
-        section.interGroupSpacing = spacing
-        let headerSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(42))
-        let header = NSCollectionLayoutBoundarySupplementaryItem(layoutSize: headerSize,
-                                                                 elementKind: UICollectionView.elementKindSectionHeader,
-                                                                 alignment: .top)
-        section.boundarySupplementaryItems = [header]
-        return UICollectionViewCompositionalLayout(section: section)
+        let columns = self.columns
+        return UICollectionViewCompositionalLayout { _, environment in
+            // 칸 크기를 화면 너비에서 직접 계산 (비율 지정은 칸이 화면 전체 너비로 잡힘)
+            let spacing: CGFloat = 2
+            let width = environment.container.effectiveContentSize.width
+            let side = max(20, floor((width - spacing * CGFloat(columns - 1)) / CGFloat(columns)))
+            let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(widthDimension: .absolute(side),
+                                                                                 heightDimension: .absolute(side)))
+            let groupSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(side))
+            let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize, subitems: [item])
+            group.interItemSpacing = .fixed(spacing)
+            let section = NSCollectionLayoutSection(group: group)
+            section.interGroupSpacing = spacing
+            let headerSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(42))
+            let header = NSCollectionLayoutBoundarySupplementaryItem(layoutSize: headerSize,
+                                                                     elementKind: UICollectionView.elementKindSectionHeader,
+                                                                     alignment: .top)
+            section.boundarySupplementaryItems = [header]
+            return section
+        }
     }
 
     // MARK: - 데이터
@@ -433,6 +462,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         for cell in collectionView.visibleCells {
             (cell as? AssetCell)?.selecting = on
         }
+        if isRoot, #available(iOS 18.0, *) {
+            tabBarController?.setTabBarHidden(on, animated: true)
+        }
         navigationController?.setToolbarHidden(!on, animated: true)
         updateChrome()
     }
@@ -493,7 +525,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             let allSelected = count == assets.count && count > 0
             navigationItem.rightBarButtonItem = UIBarButtonItem(title: allSelected ? "전체 해제" : "전체 선택", style: .plain,
                                                                 target: self, action: #selector(toggleAll))
-            for item in [shareItem, moveItem, deleteItem] {
+            for item in [shareItem, moreItem, deleteItem] {
                 item.isEnabled = count > 0
             }
         } else {
@@ -513,9 +545,34 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         Sharer.share(selectedAssets(), from: self, barButtonItem: shareItem)
     }
 
-    @objc private func moveSelected() {
-        Mover.present(from: self, assets: selectedAssets(), sourceAlbumID: folder.albumID) { [weak self] ok in
+    /// 갤럭시의 '더보기': 앨범으로 이동 · 앨범으로 복사
+    private func makeMoreMenu() -> UIMenu {
+        var actions: [UIAction] = [
+            UIAction(title: "앨범으로 이동", image: UIImage(systemName: "folder")) { [weak self] _ in self?.sendSelected(copy: false) },
+            UIAction(title: "앨범으로 복사", image: UIImage(systemName: "plus.rectangle.on.folder")) { [weak self] _ in self?.sendSelected(copy: true) },
+        ]
+        if folder.isUser {
+            actions.append(UIAction(title: "이 앨범에서 빼기", image: UIImage(systemName: "minus.circle")) { [weak self] _ in
+                self?.removeSelectedFromAlbum()
+            })
+        }
+        return UIMenu(children: actions)
+    }
+
+    private func sendSelected(copy: Bool) {
+        Mover.present(from: self, assets: selectedAssets(), sourceAlbumID: folder.albumID, copy: copy) { [weak self] ok in
             if ok { self?.setSelecting(false) }
+        }
+    }
+
+    private func removeSelectedFromAlbum() {
+        let list = selectedAssets()
+        guard !list.isEmpty, let id = folder.albumID, let album = Library.shared.album(id: id) else { return }
+        Library.shared.remove(list, from: album) { [weak self] ok in
+            if ok {
+                self?.setSelecting(false)
+                self?.toast("\(list.count)장을 앨범에서 뺐어요. 사진은 그대로 있어요")
+            }
         }
     }
 

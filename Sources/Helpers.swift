@@ -72,18 +72,50 @@ final class PaddedLabel: UILabel {
     }
 }
 
-// MARK: - 옮기기
+// MARK: - 앨범으로 이동 · 복사
 
-/// 내 폴더 고르기 시트
+enum Prefs {
+    private static let defaults = UserDefaults.standard
+
+    /// 사진 격자 칸 수
+    static var gridColumns: Int {
+        get { defaults.integer(forKey: "gridColumns") }
+        set { defaults.set(newValue, forKey: "gridColumns") }
+    }
+
+    /// 앨범 격자 칸 수 (기본 3)
+    static var albumColumns: Int {
+        get {
+            let value = defaults.integer(forKey: "albumColumns")
+            return (2...4).contains(value) ? value : 3
+        }
+        set { defaults.set(newValue, forKey: "albumColumns") }
+    }
+
+    /// 앨범 정렬: 0 기본, 1 이름, 2 장수 많은 순
+    static var albumSort: Int {
+        get { defaults.integer(forKey: "albumSort") }
+        set { defaults.set(newValue, forKey: "albumSort") }
+    }
+
+    /// 숨긴 앨범 ID
+    static var hiddenAlbums: Set<String> {
+        get { Set(defaults.stringArray(forKey: "hiddenAlbums") ?? []) }
+        set { defaults.set(Array(newValue), forKey: "hiddenAlbums") }
+    }
+}
+
+/// 내 앨범 고르기 시트
 final class FolderPickerViewController: UITableViewController {
     private let excludeAlbumID: String?
     private var folders: [Folder] = []
     var onPick: ((PHAssetCollection) -> Void)?
     var onCreate: ((String) -> Void)?
 
-    init(excludeAlbumID: String?) {
+    init(title: String, excludeAlbumID: String?) {
         self.excludeAlbumID = excludeAlbumID
         super.init(style: .insetGrouped)
+        self.title = title
     }
 
     required init?(coder: NSCoder) {
@@ -92,7 +124,6 @@ final class FolderPickerViewController: UITableViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "폴더로 옮기기"
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(close))
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
         folders = Library.shared.snapshot.folders.filter { $0.isUser && $0.albumID != excludeAlbumID }
@@ -109,19 +140,20 @@ final class FolderPickerViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        section == 1 && !folders.isEmpty ? "내 폴더" : nil
+        section == 1 && !folders.isEmpty ? "내 앨범" : nil
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
         var content = cell.defaultContentConfiguration()
         if indexPath.section == 0 {
-            content.text = "새 폴더 만들기"
-            content.image = UIImage(systemName: "folder.badge.plus")
+            content.text = "앨범 만들기"
+            content.image = UIImage(systemName: "plus.rectangle.on.folder")
         } else {
             let folder = folders[indexPath.row]
+            let count = Library.shared.snapshot.items[folder.id]?.count ?? 0
             content.text = folder.title
-            content.secondaryText = "\(Library.shared.snapshot.items[folder.id]?.count ?? 0)장"
+            content.secondaryText = String(count)
             content.image = UIImage(systemName: "folder")
         }
         cell.contentConfiguration = content
@@ -131,7 +163,7 @@ final class FolderPickerViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         if indexPath.section == 0 {
-            promptText(title: "새 폴더", placeholder: "폴더 이름", confirm: "만들기") { [weak self] name in
+            promptText(title: "앨범 만들기", placeholder: "앨범 이름", confirm: "만들기") { [weak self] name in
                 self?.onCreate?(name)
             }
         } else if let id = folders[indexPath.row].albumID, let album = Library.shared.album(id: id) {
@@ -141,22 +173,32 @@ final class FolderPickerViewController: UITableViewController {
 }
 
 enum Mover {
-    /// 고른 사진을 내 폴더로 옮기는 시트를 띄움. 끝나면 done(성공 여부)
-    static func present(from host: UIViewController, assets: [PHAsset], sourceAlbumID: String?, done: @escaping (Bool) -> Void) {
+    /// 고른 사진을 내 앨범으로 이동(copy: false)하거나 복사(copy: true)하는 시트. 끝나면 done(성공 여부)
+    static func present(from host: UIViewController, assets: [PHAsset], sourceAlbumID: String?, copy: Bool,
+                        done: @escaping (Bool) -> Void) {
         guard !assets.isEmpty else { return }
-        let source = sourceAlbumID.flatMap { Library.shared.album(id: $0) }
-        let picker = FolderPickerViewController(excludeAlbumID: sourceAlbumID)
+        // 복사는 원래 앨범에서 빼지 않음
+        let source: PHAssetCollection? = copy ? nil : sourceAlbumID.flatMap { Library.shared.album(id: $0) }
+        let verb = copy ? "복사" : "이동"
+        let count = assets.count
+        let picker = FolderPickerViewController(title: "앨범으로 " + verb, excludeAlbumID: sourceAlbumID)
         picker.onPick = { [weak host] album in
             host?.dismiss(animated: true)
-            Library.shared.move(assets, to: album, from: source) { ok in
-                host?.toast(ok ? "\(assets.count)장을 '\(album.localizedTitle ?? "")'(으)로 옮겼어요" : "옮기지 못했어요")
+            let name = album.localizedTitle ?? ""
+            let finish: (Bool) -> Void = { ok in
+                host?.toast(ok ? "\(count)장을 '\(name)' 앨범으로 \(verb)했어요" : "\(verb)하지 못했어요")
                 done(ok)
+            }
+            if copy {
+                Library.shared.copy(assets, to: album, completion: finish)
+            } else {
+                Library.shared.move(assets, to: album, from: source, completion: finish)
             }
         }
         picker.onCreate = { [weak host] name in
             host?.dismiss(animated: true)
             Library.shared.createAlbum(title: name, adding: assets, from: source) { ok in
-                host?.toast(ok ? "'\(name)' 폴더를 만들고 \(assets.count)장을 옮겼어요" : "폴더를 만들지 못했어요")
+                host?.toast(ok ? "'\(name)' 앨범을 만들고 \(count)장을 \(verb)했어요" : "앨범을 만들지 못했어요")
                 done(ok)
             }
         }

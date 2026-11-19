@@ -22,9 +22,19 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
         guard let windowScene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: windowScene)
-        let nav = UINavigationController(rootViewController: FoldersViewController())
-        nav.navigationBar.prefersLargeTitles = true
-        window.rootViewController = nav
+        let library = GridViewController(folder: Folder(id: "all", title: "보관함", symbol: "photo.on.rectangle", section: .auto),
+                                         isRoot: true)
+        let libraryNav = UINavigationController(rootViewController: library)
+        libraryNav.navigationBar.prefersLargeTitles = true
+        libraryNav.tabBarItem = UITabBarItem(title: "보관함", image: UIImage(systemName: "photo.on.rectangle"), tag: 0)
+
+        let albumsNav = UINavigationController(rootViewController: FoldersViewController())
+        albumsNav.navigationBar.prefersLargeTitles = true
+        albumsNav.tabBarItem = UITabBarItem(title: "앨범", image: UIImage(systemName: "rectangle.stack"), tag: 1)
+
+        let tabs = UITabBarController()
+        tabs.viewControllers = [libraryNav, albumsNav]
+        window.rootViewController = tabs
         window.makeKeyAndVisible()
         self.window = window
         Library.shared.start()

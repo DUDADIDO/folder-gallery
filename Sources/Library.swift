@@ -128,13 +128,14 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         }
 
         var camera: [PHAsset] = [], screenshots: [PHAsset] = [], recordings: [PHAsset] = []
-        var saved: [PHAsset] = [], videos: [PHAsset] = []
+        var saved: [PHAsset] = [], videos: [PHAsset] = [], favorites: [PHAsset] = []
         var apps: [String: [PHAsset]] = [:]
         var pending: [PHAsset] = []
         let cache = classifier.snapshotCache()
 
         for asset in all {
             if asset.mediaType == .video { videos.append(asset) }
+            if asset.isFavorite { favorites.append(asset) }
             let hidden = hideMoved && moved.contains(asset.localIdentifier)
             if asset.mediaSubtypes.contains(.photoScreenshot) {
                 if !hidden { screenshots.append(asset) }
@@ -151,8 +152,12 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
             case .recording:
                 recordings.append(asset)
             case .saved:
-                saved.append(asset)
-                if let app = entry.app { apps[app, default: []].append(asset) }
+                // 갤럭시처럼 저장한 앱마다 앨범 하나. 앱을 모르는 것만 '저장한 사진'
+                if let app = entry.app {
+                    apps[app, default: []].append(asset)
+                } else {
+                    saved.append(asset)
+                }
             }
         }
 
@@ -167,7 +172,8 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         add("saved", "저장한 사진", "square.and.arrow.down", saved)
         add("recordings", "화면 녹화", "record.circle", recordings, always: false)
         add("videos", "동영상", "video", videos, always: false)
-        add("all", "전체 사진", "photo.on.rectangle", all)
+        add("favorites", "즐겨찾기", "heart", favorites, always: false)
+        items["all"] = all   // 보관함 탭
 
         let appOrder = apps.sorted { a, b in
             a.value.count != b.value.count ? a.value.count > b.value.count : a.key < b.key
@@ -208,6 +214,15 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
                 PHAssetCollectionChangeRequest(for: source)?.removeAssets(assets as NSArray)
             }
         }, completion: completion)
+    }
+
+    /// 복사 — 원래 자리는 그대로 두고 대상 앨범에도 넣음 (파일이 늘지는 않음)
+    func copy(_ assets: [PHAsset], to album: PHAssetCollection, completion: ((Bool) -> Void)? = nil) {
+        change({ PHAssetCollectionChangeRequest(for: album)?.addAssets(assets as NSArray) }, completion: completion)
+    }
+
+    func setFavorite(_ asset: PHAsset, _ on: Bool, completion: ((Bool) -> Void)? = nil) {
+        change({ PHAssetChangeRequest(for: asset).isFavorite = on }, completion: completion)
     }
 
     func createAlbum(title: String, adding assets: [PHAsset] = [], from source: PHAssetCollection? = nil, completion: ((Bool) -> Void)? = nil) {

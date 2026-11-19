@@ -1,4 +1,5 @@
 import AVKit
+import CoreLocation
 import Photos
 import UIKit
 
@@ -12,6 +13,9 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
     private let playButton = UIButton(type: .system)
     private var requestID: PHImageRequestID = PHInvalidImageRequestID
     private var loadedSize: CGSize = .zero
+
+    /// 확대해서 보는 중인지 (이때는 아래로 쓸어 닫기를 안 함)
+    var isZoomed: Bool { scrollView.zoomScale > 1.01 }
 
     init(asset: PHAsset) {
         self.asset = asset
@@ -144,16 +148,35 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
     }
 }
 
-/// 좌우로 넘겨 보는 화면
+/// 세로로 쓸 때만 시작하는 제스처 문지기 (좌우 넘기기·확대와 안 부딪히게)
+final class VerticalPanGate: NSObject, UIGestureRecognizerDelegate {
+    var canBegin: (() -> Bool)?
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
+        let velocity = pan.velocity(in: pan.view)
+        guard abs(velocity.y) > abs(velocity.x) * 1.5 else { return false }
+        return canBegin?() ?? true
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        true
+    }
+}
+
+/// 좌우로 넘겨 보는 화면. 사진 앱처럼 아래로 쓸면 닫히고 위로 쓸면 정보가 나옴
 final class ViewerViewController: UIPageViewController, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
     private var assets: [PHAsset]
     private var currentID: String
     private let sourceAlbumID: String?
     private var chromeHidden = false
+    private let panGate = VerticalPanGate()
 
     private lazy var shareItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: self, action: #selector(shareCurrent))
-    private lazy var moveItem = UIBarButtonItem(image: UIImage(systemName: "folder"), style: .plain, target: self, action: #selector(moveCurrent))
+    private lazy var favoriteItem = UIBarButtonItem(image: UIImage(systemName: "heart"), style: .plain, target: self, action: #selector(toggleFavorite))
     private lazy var infoItem = UIBarButtonItem(image: UIImage(systemName: "info.circle"), style: .plain, target: self, action: #selector(showInfo))
+    private lazy var moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeMoreMenu())
     private lazy var deleteItem = UIBarButtonItem(image: UIImage(systemName: "trash"), style: .plain, target: self, action: #selector(deleteCurrent))
 
     private let titleFormatter: DateFormatter = {
@@ -168,6 +191,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         self.currentID = assets.indices.contains(index) ? assets[index].localIdentifier : (assets.first?.localIdentifier ?? "")
         self.sourceAlbumID = sourceAlbumID
         super.init(transitionStyle: .scroll, navigationOrientation: .horizontal, options: [.interPageSpacing: 16])
+        hidesBottomBarWhenPushed = true
     }
 
     required init?(coder: NSCoder) {
@@ -181,10 +205,19 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         dataSource = self
         delegate = self
         let space = { UIBarButtonItem.flexibleSpace() }
-        toolbarItems = [shareItem, space(), moveItem, space(), infoItem, space(), deleteItem]
+        toolbarItems = [shareItem, space(), favoriteItem, space(), infoItem, space(), moreItem, space(), deleteItem]
         if let index = currentIndex {
             setViewControllers([makePage(index)], direction: .forward, animated: false)
         }
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
+        panGate.canBegin = { [weak self] in
+            guard let page = self?.viewControllers?.first as? AssetPageViewController else { return false }
+            return !page.isZoomed
+        }
+        pan.delegate = panGate
+        view.addGestureRecognizer(pan)
+
         updateTitle()
     }
 
@@ -224,6 +257,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         } else {
             title = nil
         }
+        let favorite = currentAsset?.isFavorite ?? false
+        favoriteItem.image = UIImage(systemName: favorite ? "heart.fill" : "heart")
     }
 
     private func toggleChrome() {
@@ -233,6 +268,46 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         UIView.animate(withDuration: 0.2) {
             self.view.backgroundColor = self.chromeHidden ? .black : .systemBackground
         }
+    }
+
+    // MARK: - 쓸기 (아래: 닫기, 위: 정보)
+
+    @objc private func panned(_ gesture: UIPanGestureRecognizer) {
+        guard let pageView = viewControllers?.first?.view else { return }
+        let move = gesture.translation(in: view)
+        switch gesture.state {
+        case .changed:
+            if move.y > 0 {
+                // 사진이 손가락을 따라 내려가며 조금 작아짐
+                let progress = min(1, move.y / 320)
+                let scale = 1 - progress * 0.3
+                pageView.transform = CGAffineTransform(translationX: move.x * 0.6, y: move.y).scaledBy(x: scale, y: scale)
+                pageView.alpha = 1 - progress * 0.4
+            } else {
+                pageView.transform = CGAffineTransform(translationX: 0, y: move.y * 0.3)
+                pageView.alpha = 1
+            }
+        case .ended:
+            let speed = gesture.velocity(in: view).y
+            if move.y > 110 || (move.y > 30 && speed > 900) {
+                navigationController?.popViewController(animated: true)
+                return
+            }
+            let wantsInfo = move.y < -70 || (move.y < -20 && speed < -900)
+            restore(pageView)
+            if wantsInfo { showInfo() }
+        case .cancelled, .failed:
+            restore(pageView)
+        default:
+            break
+        }
+    }
+
+    private func restore(_ pageView: UIView) {
+        UIView.animate(withDuration: 0.25, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0, options: [], animations: {
+            pageView.transform = .identity
+            pageView.alpha = 1
+        }, completion: nil)
     }
 
     // MARK: - 넘기기
@@ -281,11 +356,33 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         Sharer.share([asset], from: self, barButtonItem: shareItem)
     }
 
-    @objc private func moveCurrent() {
+    @objc private func toggleFavorite() {
+        guard let index = currentIndex else { return }
+        let asset = assets[index]
+        let id = asset.localIdentifier
+        Library.shared.setFavorite(asset, !asset.isFavorite) { [weak self] ok in
+            guard ok, let self else { return }
+            // PHAsset 은 바뀌지 않는 값이라 새로 받아 옴
+            if let fresh = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject,
+               let at = self.assets.firstIndex(where: { $0.localIdentifier == id }) {
+                self.assets[at] = fresh
+            }
+            self.updateTitle()
+        }
+    }
+
+    private func makeMoreMenu() -> UIMenu {
+        UIMenu(children: [
+            UIAction(title: "앨범으로 이동", image: UIImage(systemName: "folder")) { [weak self] _ in self?.sendCurrent(copy: false) },
+            UIAction(title: "앨범으로 복사", image: UIImage(systemName: "plus.rectangle.on.folder")) { [weak self] _ in self?.sendCurrent(copy: true) },
+        ])
+    }
+
+    private func sendCurrent(copy: Bool) {
         guard let asset = currentAsset else { return }
-        Mover.present(from: self, assets: [asset], sourceAlbumID: sourceAlbumID) { [weak self] ok in
-            // 내 폴더에서 다른 폴더로 옮기면 이 폴더에서는 빠짐
-            if ok, self?.sourceAlbumID != nil { self?.removeCurrent() }
+        Mover.present(from: self, assets: [asset], sourceAlbumID: sourceAlbumID, copy: copy) { [weak self] ok in
+            // 내 앨범에서 다른 앨범으로 이동하면 이 앨범에서는 빠짐
+            if ok, !copy, self?.sourceAlbumID != nil { self?.removeCurrent() }
         }
     }
 
@@ -297,40 +394,99 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     }
 
     @objc private func showInfo() {
-        guard let asset = currentAsset else { return }
-        let resources = PHAssetResource.assetResources(for: asset)
+        guard let asset = currentAsset, presentedViewController == nil else { return }
+        let nav = UINavigationController(rootViewController: InfoViewController(asset: asset))
+        if let sheet = nav.sheetPresentationController {
+            sheet.detents = [.medium(), .large()]
+            sheet.prefersGrabberVisible = true
+        }
+        present(nav, animated: true)
+    }
+}
+
+/// 사진 정보 (위로 쓸거나 ⓘ)
+final class InfoViewController: UITableViewController {
+    private var rows: [(title: String, value: String)] = []
+
+    init(asset: PHAsset) {
+        super.init(style: .insetGrouped)
+        rows = InfoViewController.makeRows(asset)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "정보"
+        tableView.allowsSelection = false
+        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(close))
+    }
+
+    @objc private func close() {
+        dismiss(animated: true)
+    }
+
+    private static func makeRows(_ asset: PHAsset) -> [(title: String, value: String)] {
+        var rows: [(title: String, value: String)] = []
+        if let date = asset.creationDate {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "ko_KR")
+            formatter.dateFormat = "yyyy년 M월 d일 EEEE a h:mm"
+            rows.append(("날짜", formatter.string(from: date)))
+        }
         let isVideo = asset.mediaType == .video
+        let resources = PHAssetResource.assetResources(for: asset)
         let primaryType: PHAssetResourceType = isVideo ? .video : .photo
         let primary = resources.first { $0.type == primaryType } ?? resources.first
-        let name = primary?.originalFilename ?? "-"
+        if let name = primary?.originalFilename, !name.isEmpty {
+            rows.append(("파일", name))
+        }
+        rows.append(("크기", "\(asset.pixelWidth) × \(asset.pixelHeight)"))
+        if isVideo {
+            let total = Int(asset.duration.rounded())
+            rows.append(("길이", String(format: "%d:%02d", total / 60, total % 60)))
+        }
 
         var kind = "분류 중"
         if asset.mediaSubtypes.contains(.photoScreenshot) {
             kind = "스크린샷"
         } else if let entry = Library.shared.classifier.entry(for: asset.localIdentifier) {
             switch entry.cat {
-            case .camera: kind = "카메라"
-            case .recording: kind = "화면 녹화"
-            case .saved: kind = entry.app.map { "저장한 사진 (\($0))" } ?? "저장한 사진"
+            case .camera:
+                kind = "카메라"
+            case .recording:
+                kind = "화면 녹화"
+            case .saved:
+                if let app = entry.app {
+                    kind = app + "에서 저장"
+                } else {
+                    kind = "저장한 사진"
+                }
             }
         }
-        var lines = [
-            "파일: \(name)",
-            "크기: \(asset.pixelWidth) × \(asset.pixelHeight)",
-            "분류: \(kind)",
-        ]
-        if let date = asset.creationDate {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "ko_KR")
-            formatter.dateStyle = .long
-            formatter.timeStyle = .medium
-            lines.insert("날짜: \(formatter.string(from: date))", at: 0)
+        rows.append(("앨범", kind))
+        if asset.isFavorite {
+            rows.append(("즐겨찾기", "예"))
         }
-        if isVideo {
-            lines.append("길이: \(Int(asset.duration.rounded()))초")
+        if let location = asset.location {
+            rows.append(("위치", String(format: "%.5f, %.5f", location.coordinate.latitude, location.coordinate.longitude)))
         }
-        let alert = UIAlertController(title: "정보", message: lines.joined(separator: "\n"), preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "닫기", style: .cancel))
-        present(alert, animated: true)
+        return rows
+    }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        rows.count
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
+        var content = UIListContentConfiguration.valueCell()
+        content.text = rows[indexPath.row].title
+        content.secondaryText = rows[indexPath.row].value
+        cell.contentConfiguration = content
+        return cell
     }
 }
