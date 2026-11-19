@@ -130,7 +130,52 @@ final class DayHeaderView: UICollectionReusableView {
     }
 }
 
-/// 폴더 안 사진 격자. 길게 누르거나 옆으로 끌면 여러 장 선택
+/// 앨범에 들어가면 맨 위에 나오는 큰 대표 사진 + 이름 + 장수 (순정 사진 앱 모양)
+final class HeroHeaderView: UICollectionReusableView {
+    static let reuse = "HeroHeaderView"
+
+    let imageView = UIImageView()
+    let titleLabel = UILabel()
+    let countLabel = UILabel()
+    private let shade = CAGradientLayer()
+    var assetID: String?
+    var requestID: PHImageRequestID = PHInvalidImageRequestID
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+        backgroundColor = .systemGray5
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        addSubview(imageView)
+        shade.colors = [UIColor.clear.cgColor, UIColor.black.withAlphaComponent(0.6).cgColor]
+        layer.addSublayer(shade)
+        titleLabel.font = .systemFont(ofSize: 34, weight: .bold)
+        titleLabel.textColor = .white
+        addSubview(titleLabel)
+        countLabel.font = .systemFont(ofSize: 17, weight: .medium)
+        countLabel.textColor = .white
+        addSubview(countLabel)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        imageView.frame = bounds
+        shade.frame = CGRect(x: 0, y: bounds.height * 0.5, width: bounds.width, height: bounds.height * 0.5)
+        CATransaction.commit()
+        countLabel.frame = CGRect(x: 20, y: bounds.height - 44, width: bounds.width - 40, height: 24)
+        titleLabel.frame = CGRect(x: 20, y: bounds.height - 88, width: bounds.width - 40, height: 42)
+    }
+}
+
+/// 사진 격자. 보관함·미분류 탭은 날짜별로, 앨범 안은 순정 사진 앱처럼 큰 대표 사진 아래 이어서 보여 줌.
+/// 길게 누르거나 '선택' 뒤 옆으로 끌면 여러 장 선택
 final class GridViewController: UIViewController, UICollectionViewDataSource, UICollectionViewDelegate, UICollectionViewDataSourcePrefetching {
     private let folder: Folder
     private var assets: [PHAsset] = []
@@ -189,6 +234,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         collectionView.register(AssetCell.self, forCellWithReuseIdentifier: AssetCell.reuse)
         collectionView.register(DayHeaderView.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
                                 withReuseIdentifier: DayHeaderView.reuse)
+        collectionView.register(HeroHeaderView.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
+                                withReuseIdentifier: HeroHeaderView.reuse)
+        if !isRoot {
+            // 대표 사진이 화면 맨 위(상태 막대 아래)까지 차게
+            collectionView.contentInsetAdjustmentBehavior = .never
+        }
         view.addSubview(collectionView)
 
         emptyLabel.text = "사진이 없어요"
@@ -252,8 +303,17 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
     }
 
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        guard !isRoot, isViewLoaded, collectionView != nil else { return }
+        collectionView.contentInset.bottom = view.safeAreaInsets.bottom
+        collectionView.verticalScrollIndicatorInsets = UIEdgeInsets(top: view.safeAreaInsets.top, left: 0,
+                                                                    bottom: view.safeAreaInsets.bottom, right: 0)
+    }
+
     private func makeLayout() -> UICollectionViewLayout {
         let columns = self.columns
+        let hero = !isRoot
         return UICollectionViewCompositionalLayout { _, environment in
             // 칸 크기를 화면 너비에서 직접 계산 (비율 지정은 칸이 화면 전체 너비로 잡힘)
             let spacing: CGFloat = 2
@@ -266,7 +326,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             group.interItemSpacing = .fixed(spacing)
             let section = NSCollectionLayoutSection(group: group)
             section.interGroupSpacing = spacing
-            let headerSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(42))
+            let headerHeight: CGFloat = hero ? min(width * 1.15, 460) : 42
+            let headerSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(headerHeight))
             let header = NSCollectionLayoutBoundarySupplementaryItem(layoutSize: headerSize,
                                                                      elementKind: UICollectionView.elementKindSectionHeader,
                                                                      alignment: .top)
@@ -321,6 +382,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     private func buildSections() {
+        if !isRoot {
+            // 앨범 안: 날짜로 나누지 않고 한 덩어리
+            sections = assets.isEmpty ? [] : [(day: Date(), range: 0..<assets.count)]
+            return
+        }
         let calendar = Calendar.current
         var result: [(day: Date, range: Range<Int>)] = []
         var start = 0
@@ -392,10 +458,38 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String,
                         at indexPath: IndexPath) -> UICollectionReusableView {
+        if !isRoot {
+            let hero = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: HeroHeaderView.reuse,
+                                                                       for: indexPath) as! HeroHeaderView
+            configureHero(hero)
+            return hero
+        }
         let header = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: DayHeaderView.reuse,
                                                                      for: indexPath) as! DayHeaderView
         configure(header, section: indexPath.section)
         return header
+    }
+
+    private func configureHero(_ hero: HeroHeaderView) {
+        hero.titleLabel.text = folder.title
+        hero.countLabel.text = "\(assets.count)개의 항목"
+        guard let cover = assets.first else { return }
+        let id = cover.localIdentifier
+        guard hero.assetID != id else { return }
+        if hero.requestID != PHInvalidImageRequestID {
+            PHImageManager.default().cancelImageRequest(hero.requestID)
+        }
+        hero.assetID = id
+        let scale = traitCollection.displayScale
+        let size = CGSize(width: view.bounds.width * scale, height: view.bounds.width * 1.15 * scale)
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .opportunistic
+        options.isNetworkAccessAllowed = true
+        hero.requestID = PHImageManager.default().requestImage(for: cover, targetSize: size, contentMode: .aspectFill,
+                                                               options: options) { [weak hero] image, _ in
+            guard let hero, hero.assetID == id, let image else { return }
+            hero.imageView.image = image
+        }
     }
 
     private func configure(_ header: DayHeaderView, section: Int) {
@@ -502,6 +596,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         updateChrome()
     }
 
+    /// 미분류 사진을 한 장씩 넘기며 정리. 모든 사진을 보게 되니 Face ID 로 확인
+    @objc private func startSorter() {
+        let list = assets
+        guard !list.isEmpty else { return }
+        Auth.verify(reason: "사진 정리를 시작하려면 인증이 필요해요") { [weak self] ok in
+            guard ok, let self else { return }
+            self.navigationController?.pushViewController(SorterViewController(assets: list), animated: true)
+        }
+    }
+
     @objc private func startSelecting() {
         setSelecting(true)
     }
@@ -568,9 +672,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 item.isEnabled = count > 0
             }
         } else {
-            navigationItem.title = folder.title
+            // 앨범 안에서는 이름이 큰 대표 사진 위에 있어서 위 막대 제목은 비움
+            navigationItem.title = isRoot ? folder.title : nil
             navigationItem.hidesBackButton = false
-            navigationItem.leftBarButtonItem = nil
+            if folder.id == "unsorted" {
+                let sort = UIBarButtonItem(title: "정리하기", style: .plain, target: self, action: #selector(startSorter))
+                sort.isEnabled = !assets.isEmpty
+                navigationItem.leftBarButtonItem = sort
+            } else {
+                navigationItem.leftBarButtonItem = nil
+            }
             let select = UIBarButtonItem(title: "선택", style: .plain, target: self, action: #selector(startSelecting))
             select.isEnabled = !assets.isEmpty
             navigationItem.rightBarButtonItem = select

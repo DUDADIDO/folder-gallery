@@ -197,9 +197,18 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     private let titleFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "ko_KR")
-        formatter.dateFormat = "yyyy. M. d. a h:mm"
+        formatter.dateFormat = "yyyy년 M월 d일"
         return formatter
     }()
+
+    private let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateFormat = "a h:mm"
+        return formatter
+    }()
+    private let titleDateLabel = UILabel()
+    private let titleTimeLabel = UILabel()
 
     init(assets: [PHAsset], index: Int, sourceAlbumID: String?) {
         self.assets = assets
@@ -220,7 +229,17 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         dataSource = self
         delegate = self
         let space = { UIBarButtonItem.flexibleSpace() }
-        toolbarItems = [shareItem, space(), favoriteItem, space(), infoItem, space(), moreItem, space(), deleteItem]
+        // 순정 사진 앱처럼: 공유 | 하트·정보·더보기 | 휴지통
+        toolbarItems = [shareItem, space(), favoriteItem, infoItem, moreItem, space(), deleteItem]
+        titleDateLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        titleDateLabel.textAlignment = .center
+        titleTimeLabel.font = .systemFont(ofSize: 12)
+        titleTimeLabel.textColor = .secondaryLabel
+        titleTimeLabel.textAlignment = .center
+        let titleStack = UIStackView(arrangedSubviews: [titleDateLabel, titleTimeLabel])
+        titleStack.axis = .vertical
+        titleStack.alignment = .center
+        navigationItem.titleView = titleStack
         if let index = currentIndex {
             setViewControllers([makePage(index)], direction: .forward, animated: false)
         }
@@ -298,10 +317,13 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     private func updateTitle() {
         if let date = currentAsset?.creationDate {
-            navigationItem.title = titleFormatter.string(from: date)
+            titleDateLabel.text = titleFormatter.string(from: date)
+            titleTimeLabel.text = timeFormatter.string(from: date)
         } else {
-            navigationItem.title = nil
+            titleDateLabel.text = nil
+            titleTimeLabel.text = nil
         }
+        navigationItem.titleView?.sizeToFit()
         let favorite = currentAsset?.isFavorite ?? false
         favoriteItem.image = UIImage(systemName: favorite ? "heart.fill" : "heart")
     }

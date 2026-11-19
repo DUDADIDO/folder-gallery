@@ -35,6 +35,12 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
         albumsNav.navigationBar.prefersLargeTitles = true
         albumsNav.tabBarItem = UITabBarItem(title: "앨범", image: UIImage(systemName: "rectangle.stack"), tag: 1)
 
+        let unsorted = GridViewController(folder: Folder(id: "unsorted", title: "미분류", symbol: "tray", section: .auto),
+                                          isRoot: true)
+        let unsortedNav = UINavigationController(rootViewController: unsorted)
+        unsortedNav.navigationBar.prefersLargeTitles = true
+        unsortedNav.tabBarItem = UITabBarItem(title: "미분류", image: UIImage(systemName: "tray"), tag: 3)
+
         let hidden = FoldersViewController(mode: .hidden)
         let hiddenNav = UINavigationController(rootViewController: hidden)
         hiddenNav.navigationBar.prefersLargeTitles = true
@@ -43,7 +49,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
         self.hiddenNav = hiddenNav
 
         let tabs = UITabBarController()
-        tabs.viewControllers = [libraryNav, albumsNav, hiddenNav]
+        tabs.viewControllers = [libraryNav, albumsNav, unsortedNav, hiddenNav]
         tabs.selectedIndex = 1   // 켜면 앨범 탭부터
         tabs.delegate = self
         window.rootViewController = tabs
