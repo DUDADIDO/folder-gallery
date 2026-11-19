@@ -133,6 +133,17 @@ final class SorterViewController: UIViewController {
         navigationController?.setToolbarHidden(true, animated: animated)
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // 오른쪽으로 쓸기는 '되돌리기'라서, 밀어서 뒤로 가기는 끔 (나갈 때는 왼쪽 위 뒤로 버튼)
+        navigationController?.setBackSwipeEnabled(false)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        navigationController?.setBackSwipeEnabled(true)
+    }
+
     private func configure(_ button: UIButton, title: String, symbol: String, action: Selector) {
         var config = UIButton.Configuration.plain()
         config.image = UIImage(systemName: symbol)
@@ -215,7 +226,18 @@ final class SorterViewController: UIViewController {
 
     private func advance() {
         index += 1
+        slide(forward: true)
         showCurrent()
+    }
+
+    /// 사진이 옆으로 밀려 나가고 들어오는 효과
+    private func slide(forward: Bool) {
+        let transition = CATransition()
+        transition.type = .push
+        transition.subtype = forward ? .fromRight : .fromLeft
+        transition.duration = 0.25
+        transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        imageView.layer.add(transition, forKey: "slide")
     }
 
     @objc private func skip() {
@@ -248,6 +270,7 @@ final class SorterViewController: UIViewController {
         case .skipped(let at):
             index = at
         }
+        slide(forward: false)
         showCurrent()
     }
 
@@ -312,7 +335,13 @@ final class SorterViewController: UIViewController {
         requestID = PHImageManager.default().requestImage(for: asset, targetSize: size, contentMode: .aspectFit,
                                                           options: options) { [weak self] image, _ in
             guard let self, self.loadToken == token, let image else { return }
-            self.imageView.image = image
+            if self.imageView.image == nil {
+                UIView.transition(with: self.imageView, duration: 0.15, options: .transitionCrossDissolve, animations: {
+                    self.imageView.image = image
+                }, completion: nil)
+            } else {
+                self.imageView.image = image
+            }
         }
     }
 }

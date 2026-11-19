@@ -409,6 +409,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         sections = result
     }
 
+    /// 확대 전환이 시작하고 돌아올 자리 (그 사진의 칸). 화면 밖이면 nil
+    private func thumbnailView(forAssetID id: String) -> UIView? {
+        guard let flat = assetIDs.firstIndex(of: id) else { return nil }
+        for (section, entry) in sections.enumerated() where entry.range.contains(flat) {
+            let path = IndexPath(item: flat - entry.range.lowerBound, section: section)
+            return collectionView.cellForItem(at: path)
+        }
+        return nil
+    }
+
     private func flatIndex(_ indexPath: IndexPath) -> Int {
         sections[indexPath.section].range.lowerBound + indexPath.item
     }
@@ -533,6 +543,17 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         } else {
             collectionView.deselectItem(at: indexPath, animated: false)
             let viewer = ViewerViewController(assets: assets, index: flatIndex(indexPath), sourceAlbumID: folder.albumID)
+            if #available(iOS 18.0, *) {
+                let options = UIViewController.Transition.ZoomOptions()
+                // 정보 칸이 떠 있거나 확대 중일 때는 끌어내려 닫기를 막음
+                options.interactiveDismissShouldBegin = { [weak viewer] _ in
+                    viewer?.allowsInteractiveDismiss ?? true
+                }
+                viewer.preferredTransition = .zoom(options: options, sourceViewProvider: { [weak self, weak viewer] _ in
+                    guard let self, let id = viewer?.visibleAssetID else { return nil }
+                    return self.thumbnailView(forAssetID: id)
+                })
+            }
             navigationController?.pushViewController(viewer, animated: true)
         }
     }
@@ -585,13 +606,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             tabBarController?.setTabBarHidden(on, animated: true)
         }
         // 옆으로 끌어 선택하는 동안 '밀어서 뒤로'가 잡히지 않게
-        navigationController?.interactivePopGestureRecognizer?.isEnabled = !on
-        // iOS 26 의 '화면 어디서나 밀어서 뒤로'. 예전 SDK 로도 빌드되게 이름으로 찾음
-        let contentPop = NSSelectorFromString("interactiveContentPopGestureRecognizer")
-        if let nav = navigationController, nav.responds(to: contentPop),
-           let recognizer = nav.perform(contentPop)?.takeUnretainedValue() as? UIGestureRecognizer {
-            recognizer.isEnabled = !on
-        }
+        navigationController?.setBackSwipeEnabled(!on)
         navigationController?.setToolbarHidden(!on, animated: true)
         updateChrome()
     }

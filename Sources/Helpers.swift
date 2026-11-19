@@ -294,3 +294,15 @@ enum Sharer {
         return ok.on ? url : nil
     }
 }
+
+extension UINavigationController {
+    /// '밀어서 뒤로'(가장자리 + iOS 26 의 화면 어디서나)를 켜고 끔
+    func setBackSwipeEnabled(_ enabled: Bool) {
+        interactivePopGestureRecognizer?.isEnabled = enabled
+        // iOS 26 에만 있는 것이라 예전 SDK 로도 빌드되게 이름으로 찾음
+        let contentPop = NSSelectorFromString("interactiveContentPopGestureRecognizer")
+        if responds(to: contentPop), let recognizer = perform(contentPop)?.takeUnretainedValue() as? UIGestureRecognizer {
+            recognizer.isEnabled = enabled
+        }
+    }
+}

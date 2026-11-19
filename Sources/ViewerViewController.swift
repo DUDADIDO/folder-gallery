@@ -254,9 +254,14 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         infoController.didMove(toParent: self)
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-        panGate.canBegin = { [weak self] in
-            guard let page = self?.viewControllers?.first as? AssetPageViewController else { return false }
-            return !page.isZoomed
+        panGate.canBegin = { [weak self, weak pan] in
+            guard let self, let page = self.viewControllers?.first as? AssetPageViewController else { return false }
+            if page.isZoomed { return false }
+            // iOS 18 부터는 아래로 끌어 닫기를 시스템(확대 전환)이 함. 여기서는 위로 끌기와 정보 칸 내리기만
+            if #available(iOS 18.0, *), !self.infoShown, let pan, pan.velocity(in: self.view).y > 0 {
+                return false
+            }
+            return true
         }
         pan.delegate = panGate
         pan.maximumNumberOfTouches = 1
@@ -303,6 +308,16 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     private var currentIndex: Int? {
         assets.firstIndex { $0.localIdentifier == currentID }
+    }
+
+    /// 지금 보고 있는 사진 (확대 전환이 돌아갈 칸을 찾는 데 씀)
+    var visibleAssetID: String { currentID }
+
+    /// 시스템의 '끌어내려 닫기'를 해도 되는지
+    var allowsInteractiveDismiss: Bool {
+        if infoShown { return false }
+        if let page = viewControllers?.first as? AssetPageViewController, page.isZoomed { return false }
+        return true
     }
 
     private var currentAsset: PHAsset? {

@@ -36,6 +36,11 @@ final class AlbumCell: UICollectionViewCell {
     private var requests: [PHImageRequestID] = []
     private var token = 0
 
+    /// 꾹 눌렀을 때·끌 때 떠오르는 모양 (카드의 둥근 모서리 그대로)
+    var liftPath: UIBezierPath {
+        UIBezierPath(roundedRect: card.frame, cornerRadius: card.layer.cornerRadius)
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         contentView.addSubview(card)
@@ -51,7 +56,7 @@ final class AlbumCell: UICollectionViewCell {
         placeholder.contentMode = .scaleAspectFit
         card.addSubview(placeholder)
 
-        shade.colors = [UIColor.clear.cgColor, UIColor.black.withAlphaComponent(0.55).cgColor]
+        shade.colors = [UIColor.clear.cgColor, UIColor.black.withAlphaComponent(0.38).cgColor]
         card.layer.addSublayer(shade)
 
         for _ in 0..<4 {
@@ -180,7 +185,7 @@ final class AlbumCell: UICollectionViewCell {
                     tile.isHidden = true
                 }
                 shade.isHidden = false
-                shade.frame = CGRect(x: 0, y: bounds.height * 0.6, width: bounds.width, height: bounds.height * 0.4)
+                shade.frame = CGRect(x: 0, y: bounds.height * 0.68, width: bounds.width, height: bounds.height * 0.32)
                 placeholder.frame = CGRect(x: bounds.midX - 22, y: bounds.midY - 30, width: 44, height: 36)
                 titleLabel.textColor = .white
                 titleLabel.frame = CGRect(x: 18, y: bounds.height - 44, width: bounds.width - 36, height: 26)
@@ -414,12 +419,17 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
                 section.interGroupSpacing = gap
                 section.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: inset, bottom: 24, trailing: inset)
             }
-            let headerSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(40))
-            section.boundarySupplementaryItems = [
-                NSCollectionLayoutBoundarySupplementaryItem(layoutSize: headerSize,
-                                                            elementKind: UICollectionView.elementKindSectionHeader,
-                                                            alignment: .top),
-            ]
+            let titled = self?.groups.indices.contains(index) == true && self?.groups[index].title.isEmpty == false
+            if titled {
+                let headerSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(40))
+                section.boundarySupplementaryItems = [
+                    NSCollectionLayoutBoundarySupplementaryItem(layoutSize: headerSize,
+                                                                elementKind: UICollectionView.elementKindSectionHeader,
+                                                                alignment: .top),
+                ]
+            } else {
+                section.contentInsets.top = 16
+            }
             return section
         }
     }
@@ -690,7 +700,7 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
             case .hidden: header.detail.text = "숨긴 앨범이 없어요"
             }
         } else {
-            header.detail.text = group.title.isEmpty ? "\(group.folders.count)개" : ""
+            header.detail.text = ""
         }
     }
 
@@ -726,11 +736,58 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
         guard let folder = folder(at: indexPath) else { return }
-        if folder.isGroup {
-            navigationController?.pushViewController(FoldersViewController(mode: .folder(folder.id)), animated: true)
-        } else {
-            navigationController?.pushViewController(GridViewController(folder: folder), animated: true)
+        let next: UIViewController = folder.isGroup ? FoldersViewController(mode: .folder(folder.id)) : GridViewController(folder: folder)
+        if #available(iOS 18.0, *) {
+            let id = folder.id
+            next.preferredTransition = .zoom(sourceViewProvider: { [weak self] _ in
+                self?.cardView(forFolderID: id)
+            })
         }
+        navigationController?.pushViewController(next, animated: true)
+    }
+
+    /// 확대 전환이 시작하고 돌아올 자리 (그 앨범 카드)
+    private func cardView(forFolderID id: String) -> UIView? {
+        for (section, group) in groups.enumerated() {
+            if let item = group.folders.firstIndex(where: { $0.id == id }) {
+                return collectionView.cellForItem(at: IndexPath(item: item, section: section))?.contentView
+            }
+        }
+        return nil
+    }
+
+    private func liftPreview(at indexPath: IndexPath) -> UITargetedPreview? {
+        guard let cell = collectionView.cellForItem(at: indexPath) as? AlbumCell else { return nil }
+        let parameters = UIPreviewParameters()
+        parameters.backgroundColor = .clear
+        parameters.visiblePath = cell.liftPath
+        return UITargetedPreview(view: cell.contentView, parameters: parameters)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, contextMenuConfiguration configuration: UIContextMenuConfiguration,
+                        highlightPreviewForItemAt indexPath: IndexPath) -> UITargetedPreview? {
+        liftPreview(at: indexPath)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, contextMenuConfiguration configuration: UIContextMenuConfiguration,
+                        dismissalPreviewForItemAt indexPath: IndexPath) -> UITargetedPreview? {
+        liftPreview(at: indexPath)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, dragPreviewParametersForItemAt indexPath: IndexPath) -> UIDragPreviewParameters? {
+        guard let cell = collectionView.cellForItem(at: indexPath) as? AlbumCell else { return nil }
+        let parameters = UIDragPreviewParameters()
+        parameters.backgroundColor = .clear
+        parameters.visiblePath = cell.liftPath
+        return parameters
+    }
+
+    func collectionView(_ collectionView: UICollectionView, dropPreviewParametersForItemAt indexPath: IndexPath) -> UIDragPreviewParameters? {
+        guard let cell = collectionView.cellForItem(at: indexPath) as? AlbumCell else { return nil }
+        let parameters = UIDragPreviewParameters()
+        parameters.backgroundColor = .clear
+        parameters.visiblePath = cell.liftPath
+        return parameters
     }
 
     // MARK: - 꾹 눌렀을 때 메뉴
@@ -967,8 +1024,10 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         listMode = on
         Prefs.albumListMode = on
         refreshMenu()
-        collectionView.setCollectionViewLayout(makeLayout(), animated: false)
-        collectionView.reloadData()
+        UIView.transition(with: collectionView, duration: 0.25, options: .transitionCrossDissolve, animations: {
+            self.collectionView.setCollectionViewLayout(self.makeLayout(), animated: false)
+            self.collectionView.reloadData()
+        }, completion: nil)
     }
 
     private func createAlbum() {
