@@ -5,3 +5,4 @@ Payload/
 *.ipa
 build.log
 .DS_Store
+dist/
