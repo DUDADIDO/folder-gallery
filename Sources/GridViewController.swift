@@ -187,6 +187,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private var thumbSize = CGSize(width: 240, height: 240)
     private let isRoot: Bool
     private var selectedPerSection: [Int: Int] = [:]
+    private var layoutAnchor: IndexPath?   // 칸 수를 바꾸는 동안 가운데 남길 사진
     private let columnChoices = [3, 4, 5, 7]
     private var columns = 4
 
@@ -296,11 +297,25 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         Prefs.gridColumns = columns
         Thumbs.manager.stopCachingImagesForAllAssets()
         view.setNeedsLayout()
-        collectionView.setCollectionViewLayout(makeLayout(), animated: false)
-        collectionView.layoutIfNeeded()
-        if let anchor, anchor.section < sections.count, anchor.item < sections[anchor.section].range.count {
-            collectionView.scrollToItem(at: anchor, at: .centeredVertically, animated: false)
+        // 칸이 커지고 작아지는 것이 보이게 움직이면서 바꿈. 보던 사진이 가운데 남도록 아래 함수에서 자리를 잡음
+        layoutAnchor = anchor
+        collectionView.setCollectionViewLayout(makeLayout(), animated: true) { [weak self] _ in
+            self?.layoutAnchor = nil
         }
+    }
+
+    func collectionView(_ collectionView: UICollectionView,
+                        targetContentOffsetForProposedContentOffset proposedContentOffset: CGPoint) -> CGPoint {
+        guard let anchor = layoutAnchor, anchor.section < sections.count, anchor.item < sections[anchor.section].range.count,
+              let frame = collectionView.collectionViewLayout.layoutAttributesForItem(at: anchor)?.frame else {
+            return proposedContentOffset
+        }
+        let visible = collectionView.bounds.height
+        let top = -collectionView.adjustedContentInset.top
+        let content = collectionView.collectionViewLayout.collectionViewContentSize.height
+        let bottom = max(top, content + collectionView.adjustedContentInset.bottom - visible)
+        let y = min(max(top, frame.midY - visible / 2), bottom)
+        return CGPoint(x: proposedContentOffset.x, y: y)
     }
 
     override func viewSafeAreaInsetsDidChange() {

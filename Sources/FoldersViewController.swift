@@ -36,6 +36,9 @@ final class AlbumCell: UICollectionViewCell {
     private var requests: [PHImageRequestID] = []
     private var token = 0
 
+    /// 확대 전환이 시작하고 돌아올 둥근 카드 (모서리가 둥글어야 닫힐 때 네모 귀퉁이가 안 보임)
+    var cardView: UIView { card }
+
     /// 꾹 눌렀을 때·끌 때 떠오르는 모양 (카드의 둥근 모서리 그대로)
     var liftPath: UIBezierPath {
         UIBezierPath(roundedRect: card.frame, cornerRadius: card.layer.cornerRadius)
@@ -737,7 +740,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         collectionView.deselectItem(at: indexPath, animated: false)
         guard let folder = folder(at: indexPath) else { return }
         let next: UIViewController = folder.isGroup ? FoldersViewController(mode: .folder(folder.id)) : GridViewController(folder: folder)
-        if #available(iOS 18.0, *) {
+        // 앨범은 카드에서 커지며 열림. 폴더는 순정처럼 오른쪽에서 밀려 들어옴
+        if !folder.isGroup, #available(iOS 18.0, *) {
             let id = folder.id
             next.preferredTransition = .zoom(sourceViewProvider: { [weak self] _ in
                 self?.cardView(forFolderID: id)
@@ -750,7 +754,7 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
     private func cardView(forFolderID id: String) -> UIView? {
         for (section, group) in groups.enumerated() {
             if let item = group.folders.firstIndex(where: { $0.id == id }) {
-                return collectionView.cellForItem(at: IndexPath(item: item, section: section))?.contentView
+                return (collectionView.cellForItem(at: IndexPath(item: item, section: section)) as? AlbumCell)?.cardView
             }
         }
         return nil
