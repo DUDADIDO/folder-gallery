@@ -1,0 +1,68 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Generate project
+        run: |
+          which xcodegen || brew install xcodegen
+          xcodegen generate
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Gallery.xcodeproj \
+            -scheme Gallery \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log | grep -E "error:|warning: var|BUILD (SUCCEEDED|FAILED)|^\*\*" || true
+          if ! grep -q "BUILD SUCCEEDED" build.log; then
+            echo "::group::errors"
+            grep -n -B2 -A12 "error:" build.log | head -400 || true
+            echo "::endgroup::"
+            tail -60 build.log
+            exit 1
+          fi
+
+      - name: Package IPA
+        run: |
+          APP=build/Build/Products/Release-iphoneos/Gallery.app
+          test -d "$APP"
+          /usr/libexec/PlistBuddy -c "Print" "$APP/Info.plist" | head -60
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry Gallery.ipa Payload
+          ls -l Gallery.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Gallery-ipa
+          path: Gallery.ipa
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
