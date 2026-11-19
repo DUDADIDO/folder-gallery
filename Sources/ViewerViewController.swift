@@ -174,7 +174,7 @@ final class VerticalPanGate: NSObject, UIGestureRecognizerDelegate {
     }
 }
 
-/// 좌우로 넘겨 보는 화면. 사진 앱처럼 아래로 쓸면 닫히고 위로 쓸면 정보가 나옴
+/// 좌우로 넘겨 보는 화면. 사진 앱처럼 아래로 쓸면 닫히고, 위로 끌면 사진이 작아지며 아래에 정보가 나옴
 final class ViewerViewController: UIPageViewController, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
     private var assets: [PHAsset]
     private var currentID: String
@@ -183,9 +183,14 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     private let panGate = VerticalPanGate()
     private weak var pannedView: UIView?   // 쓸기 시작할 때 잡은 사진 화면
 
+    // 정보 칸 (화면 아래 45%)
+    private let infoController = InfoViewController()
+    private var infoShown = false
+    private var panStartedWithInfo = false
+
     private lazy var shareItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: self, action: #selector(shareCurrent))
     private lazy var favoriteItem = UIBarButtonItem(image: UIImage(systemName: "heart"), style: .plain, target: self, action: #selector(toggleFavorite))
-    private lazy var infoItem = UIBarButtonItem(image: UIImage(systemName: "info.circle"), style: .plain, target: self, action: #selector(showInfo))
+    private lazy var infoItem = UIBarButtonItem(image: UIImage(systemName: "info.circle"), style: .plain, target: self, action: #selector(toggleInfo))
     private lazy var moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeMoreMenu())
     private lazy var deleteItem = UIBarButtonItem(image: UIImage(systemName: "trash"), style: .plain, target: self, action: #selector(deleteCurrent))
 
@@ -220,6 +225,15 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             setViewControllers([makePage(index)], direction: .forward, animated: false)
         }
 
+        addChild(infoController)
+        infoController.view.layer.cornerRadius = 18
+        infoController.view.layer.cornerCurve = .continuous
+        infoController.view.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        infoController.view.clipsToBounds = true
+        infoController.view.isHidden = true
+        view.addSubview(infoController.view)
+        infoController.didMove(toParent: self)
+
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
         panGate.canBegin = { [weak self] in
             guard let page = self?.viewControllers?.first as? AssetPageViewController else { return false }
@@ -232,6 +246,17 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         updateTitle()
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // 변형(transform)이 걸려 있어도 안전하게 크기와 중심으로 놓음
+        let height = panelHeight
+        infoController.view.bounds = CGRect(x: 0, y: 0, width: view.bounds.width, height: height)
+        infoController.view.center = CGPoint(x: view.bounds.midX, y: view.bounds.height - height / 2)
+        if !infoShown && pannedView == nil {
+            infoController.view.transform = CGAffineTransform(translationX: 0, y: height)
+        }
+    }
+
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         // 영상 재생 화면에서 돌아올 때도 숨김 상태를 그대로
@@ -242,7 +267,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // 닫다가 취소했을 때 남은 변형을 지움
-        if let pageView = pannedView {
+        if !infoShown, let pageView = viewControllers?.first?.view {
             pageView.transform = .identity
             pageView.alpha = 1
         }
@@ -267,18 +292,26 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     private func makePage(_ index: Int) -> AssetPageViewController {
         let page = AssetPageViewController(asset: assets[index])
-        page.onSingleTap = { [weak self] in self?.toggleChrome() }
+        page.onSingleTap = { [weak self] in self?.tapped() }
         return page
     }
 
     private func updateTitle() {
         if let date = currentAsset?.creationDate {
-            title = titleFormatter.string(from: date)
+            navigationItem.title = titleFormatter.string(from: date)
         } else {
-            title = nil
+            navigationItem.title = nil
         }
         let favorite = currentAsset?.isFavorite ?? false
         favoriteItem.image = UIImage(systemName: favorite ? "heart.fill" : "heart")
+    }
+
+    private func tapped() {
+        if infoShown {
+            setInfo(false, animated: true)
+        } else {
+            toggleChrome()
+        }
     }
 
     private func toggleChrome() {
@@ -290,41 +323,121 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         }
     }
 
-    // MARK: - 쓸기 (아래: 닫기, 위: 정보)
+    // MARK: - 정보 칸
+
+    private var panelHeight: CGFloat {
+        max(220, view.bounds.height * 0.45)
+    }
+
+    /// 좌우 넘기기를 맡는 안쪽 스크롤뷰. 세로로 끄는 동안과 정보가 떠 있는 동안은 잠금
+    private var pagingScrollView: UIScrollView? {
+        view.subviews.compactMap { $0 as? UIScrollView }.first
+    }
+
+    /// progress 0: 사진만, 1: 사진이 위로 작아지고 정보가 다 올라옴
+    private func applyInfo(_ progress: CGFloat, to pageView: UIView) {
+        let height = panelHeight
+        let total = max(1, view.bounds.height)
+        let topScale = max(0.4, (total - height) / total)
+        let scale = 1 - (1 - topScale) * progress
+        pageView.transform = CGAffineTransform(translationX: 0, y: -height / 2 * progress).scaledBy(x: scale, y: scale)
+        pageView.alpha = 1
+        infoController.view.transform = CGAffineTransform(translationX: 0, y: height * (1 - progress))
+    }
+
+    private func prepareInfo() {
+        if let asset = currentAsset {
+            infoController.show(asset)
+        }
+        infoController.view.isHidden = false
+        view.bringSubviewToFront(infoController.view)
+    }
+
+    private func setInfo(_ shown: Bool, animated: Bool) {
+        guard let pageView = viewControllers?.first?.view else { return }
+        if shown { prepareInfo() }
+        infoShown = shown
+        pagingScrollView?.isScrollEnabled = !shown
+        infoItem.image = UIImage(systemName: shown ? "info.circle.fill" : "info.circle")
+        let finish = {
+            if !self.infoShown {
+                self.infoController.view.isHidden = true
+                pageView.transform = .identity
+            }
+        }
+        guard animated else {
+            applyInfo(shown ? 1 : 0, to: pageView)
+            finish()
+            return
+        }
+        UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.allowUserInteraction], animations: {
+            self.applyInfo(shown ? 1 : 0, to: pageView)
+        }, completion: { _ in
+            finish()
+        })
+    }
+
+    @objc private func toggleInfo() {
+        setInfo(!infoShown, animated: true)
+    }
+
+    // MARK: - 세로로 끌기 (아래: 닫기, 위: 정보)
 
     @objc private func panned(_ gesture: UIPanGestureRecognizer) {
         if gesture.state == .began {
             pannedView = viewControllers?.first?.view
+            panStartedWithInfo = infoShown
+            // 끄는 동안 옆 사진으로 넘어가지 않게
+            pagingScrollView?.isScrollEnabled = false
+            if !infoShown, let pageView = pannedView {
+                prepareInfo()
+                applyInfo(0, to: pageView)
+            }
         }
         guard let pageView = pannedView else { return }
         let move = gesture.translation(in: view)
+        let height = panelHeight
+
         switch gesture.state {
         case .changed:
             if let page = viewControllers?.first as? AssetPageViewController, page.isZoomed {
-                restore(pageView)   // 쓸다가 확대가 시작되면 그만둠
-                return
+                return   // 끌다가 확대가 시작되면 그대로 둠
             }
-            if move.y > 0 {
-                // 사진이 손가락을 따라 내려가며 조금 작아짐
+            if panStartedWithInfo {
+                // 정보가 떠 있을 때: 아래로 끌면 내려감
+                applyInfo(min(1, max(0, 1 - move.y / height)), to: pageView)
+            } else if move.y <= 0 {
+                // 위로 끌기: 손가락을 따라 사진이 작아지고 정보가 올라옴
+                applyInfo(min(1, -move.y / height), to: pageView)
+            } else {
+                // 아래로 끌기: 닫기
+                infoController.view.transform = CGAffineTransform(translationX: 0, y: height)
                 let progress = min(1, move.y / 320)
                 let scale = 1 - progress * 0.3
                 pageView.transform = CGAffineTransform(translationX: move.x * 0.6, y: move.y).scaledBy(x: scale, y: scale)
                 pageView.alpha = 1 - progress * 0.4
-            } else {
-                pageView.transform = CGAffineTransform(translationX: 0, y: move.y * 0.3)
-                pageView.alpha = 1
             }
         case .ended:
             let speed = gesture.velocity(in: view).y
-            if move.y > 110 || (move.y > 30 && speed > 900) {
+            pannedView = nil
+            if panStartedWithInfo {
+                setInfo(!(move.y > 60 || speed > 700), animated: true)
+            } else if move.y <= 0 {
+                setInfo(-move.y > 70 || speed < -700, animated: true)
+            } else if move.y > 110 || (move.y > 30 && speed > 900) {
+                pagingScrollView?.isScrollEnabled = true
+                infoController.view.isHidden = true
                 navigationController?.popViewController(animated: true)
-                return
+            } else {
+                // 조금만 내렸다 놓음: 제자리로
+                infoShown = false
+                pagingScrollView?.isScrollEnabled = true
+                infoController.view.isHidden = true
+                restore(pageView)
             }
-            let wantsInfo = move.y < -70 || (move.y < -20 && speed < -900)
-            restore(pageView)
-            if wantsInfo { showInfo() }
         case .cancelled, .failed:
-            restore(pageView)
+            pannedView = nil
+            setInfo(panStartedWithInfo, animated: true)
         default:
             break
         }
@@ -357,6 +470,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
                             previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
+        // 넘어간 뒤 남아 있던 화면의 변형을 지움
+        for old in previousViewControllers {
+            old.view.transform = .identity
+            old.view.alpha = 1
+        }
         guard completed, let page = viewControllers?.first as? AssetPageViewController else { return }
         currentID = page.asset.localIdentifier
         updateTitle()
@@ -368,6 +486,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         let wasCurrent = id == currentID
         assets.remove(at: index)
         guard wasCurrent else { return }
+        if infoShown { setInfo(false, animated: false) }
         if assets.isEmpty {
             navigationController?.popViewController(animated: true)
             return
@@ -395,6 +514,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             if let fresh = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject,
                let at = self.assets.firstIndex(where: { $0.localIdentifier == id }) {
                 self.assets[at] = fresh
+                if self.infoShown, id == self.currentID { self.infoController.show(fresh) }
             }
             self.updateTitle()
         }
@@ -423,25 +543,14 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             if ok { self?.remove(id: id) }
         }
     }
-
-    @objc private func showInfo() {
-        guard let asset = currentAsset, presentedViewController == nil else { return }
-        let nav = UINavigationController(rootViewController: InfoViewController(asset: asset))
-        if let sheet = nav.sheetPresentationController {
-            sheet.detents = [.medium(), .large()]
-            sheet.prefersGrabberVisible = true
-        }
-        present(nav, animated: true)
-    }
 }
 
-/// 사진 정보 (위로 쓸거나 ⓘ)
+/// 사진 정보 칸 (사진을 위로 끌거나 ⓘ)
 final class InfoViewController: UITableViewController {
     private var rows: [(title: String, value: String)] = []
 
-    init(asset: PHAsset) {
+    init() {
         super.init(style: .insetGrouped)
-        rows = InfoViewController.makeRows(asset)
     }
 
     required init?(coder: NSCoder) {
@@ -450,14 +559,16 @@ final class InfoViewController: UITableViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "정보"
         tableView.allowsSelection = false
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
-        navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(close))
     }
 
-    @objc private func close() {
-        dismiss(animated: true)
+    func show(_ asset: PHAsset) {
+        rows = InfoViewController.makeRows(asset)
+        if isViewLoaded {
+            tableView.reloadData()
+            tableView.setContentOffset(CGPoint(x: 0, y: -tableView.adjustedContentInset.top), animated: false)
+        }
     }
 
     private static func makeRows(_ asset: PHAsset) -> [(title: String, value: String)] {

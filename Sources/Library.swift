@@ -10,7 +10,10 @@ struct Folder: Hashable {
     let symbol: String
     let section: Section
 
-    var isUser: Bool { section == .user }
+    /// 앨범 묶음(그룹)인지
+    var isGroup: Bool { id.hasPrefix(AlbumGroup.prefix) }
+    /// 내가 만든 앨범(사진 앱 앨범)인지
+    var isUser: Bool { section == .user && !isGroup }
     /// 내 폴더(사진 앱 앨범)일 때 앨범 ID
     var albumID: String? { isUser ? String(id.dropFirst("album:".count)) : nil }
 }
