@@ -489,6 +489,8 @@ final class PhotoGridLayout: UICollectionViewLayout {
         guard let zoom else {
             let geometry = self.geometry(columns)
             elements(in: rect, geometry, items: &items, headers: &headers)
+            // 머리글 높이가 0 이면(보관함·미분류) 머리글을 아예 안 둠 (빈 머리글의 글자가 사진 위로 삐져나오지 않게)
+            if geometry.header <= 0 { headers.removeAll() }
             var result = headers.map { headerAttributes(section: $0, geometry, zoom: nil) }
             result.append(contentsOf: items.map { itemAttributes($0, geometry, zoom: nil) })
             return result
@@ -499,6 +501,7 @@ final class PhotoGridLayout: UICollectionViewLayout {
         let bottom = unzoomedY(rect.maxY, geometry, zoom.scale)
         let search = CGRect(x: geometry.x, y: top, width: max(1, geometry.width), height: max(1, bottom - top))
         elements(in: search, geometry, items: &items, headers: &headers)
+        if geometry.header <= 0 { headers.removeAll() }
         var result: [UICollectionViewLayoutAttributes] = []
         result.reserveCapacity(items.count + headers.count)
         for section in headers {
@@ -572,8 +575,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 보여 주는 사진 목록 (화면 차례). 같은 목록인지는 list.version 으로 앎 (사진을 하나하나 비교하지 않음)
     private var list: AssetList = .empty
     private var sections: DaySections = []
-    /// 처음에 바로 날짜로 나누는 사진 수. 그 뒤는 한 묶음으로 두고, 전체는 뒤에서 계산해 바꿔 넣음
-    private static let exactSectionLimit = 3000
+    /// 보관함·미분류 위의 제목 (순정 iOS 27 처럼 사진 위에 어두운 그라데이션 + 흰 큰 제목 + 날짜·개수)
+    private let titleOverlay = LibraryTitleOverlay()
+    /// 처음 보일 때 최신 사진(맨 끝)으로 내려가야 하는지 (자리가 잡힌 뒤에)
+    private var needsScrollToLatest = true
+    /// 보관함의 필터 (순정 필터 메뉴처럼: 모든 항목 · 즐겨찾기 · 비디오)
+    private var libraryFilter: LibraryFilter = .all
     private var collectionView: UICollectionView!
     private let gridLayout = PhotoGridLayout()
     private let emptyLabel = UILabel()
@@ -675,10 +682,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         backdrop.frame = view.bounds
         backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(backdrop)
-        navigationItem.largeTitleDisplayMode = isRoot ? .always : .never
+        // 보관함·미분류의 큰 제목은 시스템 막대가 아니라 사진 위에 직접 그림 (순정 iOS 27)
+        navigationItem.largeTitleDisplayMode = .never
 
         // 앨범 표지는 정사각형 (앨범 카드와 같은 모양이라 확대 전환이 딱 맞음)
-        gridLayout.headerHeight = isRoot ? 42 : nil
+        // 보관함·미분류는 날짜 머리글 없이 한 덩어리 (순정 iOS 27: 날짜는 제목 밑에 지금 보이는 곳 기준으로)
+        gridLayout.headerHeight = isRoot ? 0 : nil
         gridLayout.columns = columns
         gridLayout.aspect = { [weak self] flat in
             guard let self, flat >= 0, flat < self.list.count else { return 1 }
@@ -701,14 +710,20 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                                 withReuseIdentifier: DayHeaderView.reuse)
         collectionView.register(HeroHeaderView.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
                                 withReuseIdentifier: HeroHeaderView.reuse)
-        if !isRoot {
-            // 대표 사진이 화면 맨 위(상태 막대 아래)까지 차게
-            collectionView.contentInsetAdjustmentBehavior = .never
-        }
+        // 앨범: 대표 사진이 화면 맨 위까지. 보관함·미분류: 순정 iOS 27 처럼 사진이 제목 뒤 맨 위까지 (아래만 띄움)
+        collectionView.contentInsetAdjustmentBehavior = .never
         view.addSubview(collectionView)
         // 맨 아래에 backdrop 이 먼저 깔려 있어 UIKit 이 이 스크롤뷰를 스스로 못 찾음.
         // 알려 줘야 스크롤할 때 큰 제목이 접히고, 위·아래 막대 밑의 흐림(가장자리 효과)이 생김
         setContentScrollView(collectionView, for: [.top, .bottom])
+        if isRoot {
+            titleOverlay.title = folder.title
+            view.addSubview(titleOverlay)
+            // 위쪽은 우리 그라데이션이 맡음 (시스템 가장자리 효과가 겹치면 막대 아래로 딱딱한 선이 생김)
+            if #available(iOS 26.0, *) {
+                collectionView.topEdgeEffect.isHidden = true
+            }
+        }
 
         emptyLabel.text = "사진이 없어요"
         emptyLabel.textColor = .secondaryLabel
@@ -737,6 +752,86 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateThumbSize()
+        if isRoot {
+            layoutTitleOverlay()
+            if needsScrollToLatest, !list.isEmpty, view.bounds.height > 0 {
+                needsScrollToLatest = false
+                scrollToLatest()
+            }
+        }
+    }
+
+    // MARK: - 보관함 위 제목 (순정 iOS 27)
+
+    /// 위 막대 버튼 줄의 높이에 제목을 맞추고, 그 아래로 날짜·개수, 그 밑까지 어두운 그라데이션
+    private func layoutTitleOverlay() {
+        let barFrame = navigationController.map { view.convert($0.navigationBar.frame, from: $0.view) }
+            ?? CGRect(x: 0, y: view.safeAreaInsets.top, width: view.bounds.width, height: 54)
+        titleOverlay.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: barFrame.maxY + 46)
+        titleOverlay.titleCenterY = barFrame.midY
+        titleOverlay.leading = view.safeAreaInsets.left + 20
+        updateTitleOverlay()
+    }
+
+    /// 순정처럼 제목·그라데이션은 사진이 밑에 있을 때만 (선택 중에는 위 막대 제목으로)
+    private func updateTitleOverlay() {
+        guard isRoot, isViewLoaded, collectionView != nil else { return }
+        titleOverlay.isHidden = selecting
+        titleOverlay.subtitle = overlaySubtitle()
+        let dark = !list.isEmpty
+        if titleOverlay.dark != dark {
+            titleOverlay.dark = dark
+            setNeedsStatusBarAppearanceUpdate()
+        }
+    }
+
+    /// 맨 끝(최신 쪽)에 있으면 개수, 아니면 제목 밑에 보이는 사진의 날짜
+    private func overlaySubtitle() -> String? {
+        guard !list.isEmpty else { return nil }
+        let latestAtBottom = !newestFirst
+        let offset = collectionView.contentOffset.y
+        let inset = collectionView.adjustedContentInset
+        let maxOffset = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
+        let atLatest = latestAtBottom ? offset >= maxOffset - 8 : offset <= -inset.top + 8
+        if atLatest {
+            return "항목 \(list.count.formatted())개"
+        }
+        let probe = CGPoint(x: collectionView.bounds.midX, y: offset + inset.top + 4)
+        let path = collectionView.indexPathForItem(at: probe)
+            ?? collectionView.indexPathsForVisibleItems.min()
+        guard let path, let date = list[flatIndex(path)].creationDate else { return nil }
+        return LibraryTitleOverlay.dateText(date)
+    }
+
+    /// 최신 사진이 있는 끝으로 (오래된 순이면 맨 아래)
+    private func scrollToLatest() {
+        guard collectionView != nil, !list.isEmpty else { return }
+        collectionView.layoutIfNeeded()
+        let inset = collectionView.adjustedContentInset
+        let y = newestFirst ? -inset.top
+            : max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
+        collectionView.setContentOffset(CGPoint(x: collectionView.contentOffset.x, y: y), animated: false)
+        updateTitleOverlay()
+    }
+
+    private var isAtLatest: Bool {
+        guard collectionView != nil, !list.isEmpty else { return true }
+        let inset = collectionView.adjustedContentInset
+        let offset = collectionView.contentOffset.y
+        if newestFirst { return offset <= -inset.top + 8 }
+        let maxOffset = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
+        return offset >= maxOffset - 8
+    }
+
+    override var preferredStatusBarStyle: UIStatusBarStyle {
+        // 사진 위 어두운 그라데이션에서는 흰 글자 (순정처럼)
+        isRoot && titleOverlay.dark && !selecting ? .lightContent : .default
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard isRoot, scrollView === collectionView else { return }
+        let text = overlaySubtitle()
+        if text != titleOverlay.subtitle { titleOverlay.subtitle = text }
     }
 
     /// 썸네일을 받을 크기: 지금 칸 수의 한 칸 (1칸이면 화면 너비). 칸 수가 정해질 때만 바뀜 (손가락을 움직이는 동안은 그대로)
@@ -1208,10 +1303,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     override func viewSafeAreaInsetsDidChange() {
         super.viewSafeAreaInsetsDidChange()
-        guard !isRoot, isViewLoaded, collectionView != nil else { return }
+        guard isViewLoaded, collectionView != nil else { return }
+        let wasAtLatest = isRoot && !needsScrollToLatest && isAtLatest
         collectionView.contentInset.bottom = view.safeAreaInsets.bottom
         collectionView.verticalScrollIndicatorInsets = UIEdgeInsets(top: view.safeAreaInsets.top, left: 0,
                                                                     bottom: view.safeAreaInsets.bottom, right: 0)
+        if wasAtLatest { scrollToLatest() }
     }
 
     // MARK: - 데이터
@@ -1238,7 +1335,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 임시 목록(켤 때 먼저 보여 주는 자동 분류·미분류)은 사진 목록이 없거나 표지 한 장뿐이라 전체 목록이 올 때까지 비워 둠
         let provisional = snapshot.isProvisional(folder.id)
         // 앨범 안은 순정처럼 오래된 항목 순이 기본 (같은 저장소를 뒤집어 봄)
-        let new = provisional ? AssetList.empty : Library.shared.list(for: folder.id, newestFirst: newestFirst)
+        let new = provisional ? AssetList.empty : Library.shared.list(for: listID, newestFirst: newestFirst)
         if !force && new.version == list.version {
             list = new   // 들어 있는 사진·순서는 같고, 즐겨찾기·편집 상태가 바뀐 새 값으로
             refreshHero()   // 이름·표지가 바뀌었을 수 있음
@@ -1247,6 +1344,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
         // 고른 사진은 ID 로 기억했다가 새 목록에서 찾아 다시 고름 (목록 전체를 훑지 않음)
         let keep = selectedAssets().map(\.localIdentifier)
+        // 최신 쪽 끝을 보고 있었으면 새 사진이 들어와도 끝에 머묾 (순정처럼)
+        let stayAtLatest = isRoot && !needsScrollToLatest && isAtLatest
         list = new
         buildSections()
         gridLayout.setSections(sections.map { $0.range.count })
@@ -1265,69 +1364,30 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 collectionView.selectItem(at: path, animated: false, scrollPosition: [])
             }
         }
+        if stayAtLatest { scrollToLatest() }
         updateChrome()
     }
 
     /// 날짜별 묶음. 앨범 안은 한 덩어리. 보관함·미분류는 앞의 몇천 장만 바로 날짜로 나누고(메인 줄에서 전부 읽지 않게)
     /// 나머지는 한 묶음으로 둔 뒤, 전체 묶음을 Library 가 뒤에서 계산해 오면 바꿔 넣음
     private func buildSections() {
-        if !isRoot {
-            // 앨범 안: 날짜로 나누지 않고 한 덩어리
-            sections = list.isEmpty ? [] : [(day: Date(), range: 0..<list.count)]
-            return
-        }
-        if let cached = Library.shared.cachedDaySections(folder.id, version: list.version) {
-            sections = cached
-            return
-        }
-        let limit = GridViewController.exactSectionLimit
-        sections = list.daySections(limit: limit)
-        guard list.count > limit else { return }
-        let version = list.version
-        Library.shared.daySections(for: list, key: folder.id) { [weak self] full in
-            self?.applyFullSections(full, version: version)
-        }
+        // 날짜로 나누지 않고 한 덩어리 (앨범 안, 그리고 순정 iOS 27 처럼 보관함·미분류도)
+        sections = list.isEmpty ? [] : [(day: Date(), range: 0..<list.count)]
     }
 
-    /// 뒤에서 계산한 전체 날짜별 묶음으로 바꿈. 앞부분은 같아서 보통 아무것도 안 움직이고,
-    /// 이미 뒷부분까지 내려가 있으면 화면 맨 위의 사진을 제자리에 둠
-    private func applyFullSections(_ full: DaySections, version: Int) {
-        guard isViewLoaded, collectionView != nil, isRoot, list.version == version else { return }
-        if transitioning || isPinching {
-            // 화면 전환·칸 수 바꾸기가 끝난 뒤에
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.applyFullSections(full, version: version)
-            }
-            return
-        }
-        let selectedFlats = (collectionView.indexPathsForSelectedItems ?? []).map { flatIndex($0) }
-        var anchor: (flat: Int, offset: CGFloat)?
-        if let top = collectionView.indexPathsForVisibleItems.min(),
-           let frame = gridLayout.layoutAttributesForItem(at: top)?.frame {
-            anchor = (flatIndex(top), frame.minY - collectionView.contentOffset.y)
-        }
-        sections = full
-        gridLayout.setSections(sections.map { $0.range.count })
-        collectionView.reloadData()
-        collectionView.layoutIfNeeded()
-        if let anchor, let path = indexPath(forFlat: anchor.flat),
-           let frame = gridLayout.layoutAttributesForItem(at: path)?.frame {
-            let y = frame.minY - anchor.offset
-            if abs(y - collectionView.contentOffset.y) > 0.5 {
-                collectionView.contentOffset = CGPoint(x: collectionView.contentOffset.x, y: y)
-            }
-        }
-        for flat in selectedFlats {
-            if let path = indexPath(forFlat: flat) {
-                collectionView.selectItem(at: path, animated: false, scrollPosition: [])
-            }
-        }
-        if selecting { updateChrome() }
-    }
-
-    /// 앨범 화면은 최신순인지 (보관함·미분류 탭은 늘 최신순)
+    /// 최신순인지. 순정 iOS 27 처럼 보관함·미분류·앨범 모두 오래된 순(최신이 맨 아래)이 기본, 정렬 메뉴로 바꿈
     private var newestFirst: Bool {
-        isRoot || Prefs.newestFirstAlbums.contains(folder.id)
+        Prefs.newestFirstAlbums.contains(folder.id)
+    }
+
+    /// 실제로 읽는 목록 (보관함은 필터에 따라 즐겨찾기·비디오 목록으로)
+    private var listID: String {
+        guard folder.id == "all" else { return folder.id }
+        switch libraryFilter {
+        case .all: return "all"
+        case .favorites: return "favorites"
+        case .videos: return "videos"
+        }
     }
 
     /// 앨범 카드에서 열리고 닫히는 확대 전환이 맞출 자리: 화면 맨 위의 정사각형 (이 화면 좌표).
@@ -1715,8 +1775,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 item.isEnabled = count > 0
             }
         } else {
-            // 앨범 안에서는 이름이 큰 대표 사진 위에 있어서 위 막대 제목은 비움
-            navigationItem.title = isRoot ? folder.title : nil
+            // 앨범 안에서는 이름이 큰 대표 사진 위에, 보관함·미분류는 사진 위 제목에 있어서 위 막대 제목은 비움
+            navigationItem.title = nil
             navigationItem.hidesBackButton = false
             if folder.id == "unsorted" {
                 let sort = UIBarButtonItem(title: "정리하기", style: .plain, target: self, action: #selector(startSorter))
@@ -1728,7 +1788,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             let select = UIBarButtonItem(title: "선택", style: .plain, target: self, action: #selector(startSelecting))
             select.isEnabled = !list.isEmpty
             if isRoot {
-                navigationItem.rightBarButtonItem = select
+                // 순정 iOS 27 보관함처럼: [정렬·필터] [선택]
+                navigationItem.rightBarButtonItems = [
+                    select, UIBarButtonItem.fixedSpace(8),
+                    UIBarButtonItem(image: UIImage(systemName: libraryFilter == .all ? "line.3.horizontal.decrease"
+                                                    : "line.3.horizontal.decrease.circle.fill"), menu: makeLibraryMenu()),
+                ]
             } else {
                 // 순정 앨범 화면처럼: [정렬 ⋯] [선택]
                 var items: [UIBarButtonItem] = [select, UIBarButtonItem.fixedSpace(8)]
@@ -1740,6 +1805,36 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
         }
         refreshVisibleHeaders()
+        updateTitleOverlay()
+        setNeedsStatusBarAppearanceUpdate()
+    }
+
+    /// 보관함·미분류의 정렬·필터 메뉴 (보관함에만 필터)
+    private func makeLibraryMenu() -> UIMenu {
+        var children: [UIMenuElement] = [UIMenu(options: .displayInline, children: makeSortMenu().children)]
+        if folder.id == "all" {
+            let filters: [(LibraryFilter, String, String)] = [
+                (.all, "모든 항목", "photo.on.rectangle"),
+                (.favorites, "즐겨찾기", "heart"),
+                (.videos, "비디오", "video"),
+            ]
+            let actions = filters.map { filter, title, symbol in
+                UIAction(title: title, image: UIImage(systemName: symbol), state: libraryFilter == filter ? .on : .off) { [weak self] _ in
+                    self?.setLibraryFilter(filter)
+                }
+            }
+            children.append(UIMenu(title: "필터", options: .displayInline, children: actions))
+        }
+        return UIMenu(children: children)
+    }
+
+    private func setLibraryFilter(_ filter: LibraryFilter) {
+        guard filter != libraryFilter else { return }
+        libraryFilter = filter
+        needsScrollToLatest = true
+        reloadFromLibrary(force: true)
+        view.setNeedsLayout()
+        updateChrome()
     }
 
     // MARK: - 앨범 화면의 위 버튼 (정렬 · ⋯)
@@ -1765,7 +1860,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             set.remove(folder.id)
         }
         Prefs.newestFirstAlbums = set
+        needsScrollToLatest = isRoot
         reloadFromLibrary(force: true)
+        if isRoot { view.setNeedsLayout() }
         updateChrome()
     }
 
@@ -1832,5 +1929,99 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         Library.shared.delete(list) { [weak self] ok in
             if ok { self?.setSelecting(false) }
         }
+    }
+}
+
+// MARK: - 보관함 필터
+
+enum LibraryFilter {
+    case all, favorites, videos
+}
+
+// MARK: - 보관함 위 제목 (순정 iOS 27: 사진 위 어두운 그라데이션 + 흰 큰 제목 + 날짜·개수)
+
+final class LibraryTitleOverlay: UIView {
+    private let gradient = CAGradientLayer()
+    private let titleLabel = UILabel()
+    private let subtitleLabel = UILabel()
+    var titleCenterY: CGFloat = 86 { didSet { setNeedsLayout() } }
+    var leading: CGFloat = 20 { didSet { setNeedsLayout() } }
+
+    var title: String? {
+        get { titleLabel.text }
+        set { titleLabel.text = newValue }
+    }
+
+    var subtitle: String? {
+        get { subtitleLabel.text }
+        set {
+            subtitleLabel.text = newValue
+            subtitleLabel.isHidden = newValue == nil
+            // 글자 길이가 바뀌면 너비도 다시 (안 그러면 앞 글자 길이로 잘림)
+            setNeedsLayout()
+        }
+    }
+
+    /// 사진 위(어두운 그라데이션 + 흰 글자)인지, 빈 화면(검은 글자)인지
+    var dark = true {
+        didSet { applyStyle() }
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateFormat = "yyyy년 M월 d일"
+        return formatter
+    }()
+
+    static func dateText(_ date: Date) -> String {
+        dateFormatter.string(from: date)
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        layer.addSublayer(gradient)
+        titleLabel.font = .systemFont(ofSize: 34, weight: .bold)
+        titleLabel.adjustsFontForContentSizeCategory = false
+        subtitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        addSubview(titleLabel)
+        addSubview(subtitleLabel)
+        applyStyle()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func applyStyle() {
+        gradient.isHidden = !dark
+        gradient.colors = [UIColor.black.withAlphaComponent(0.55).cgColor, UIColor.black.withAlphaComponent(0.25).cgColor,
+                           UIColor.black.withAlphaComponent(0).cgColor]
+        gradient.locations = [0, 0.55, 1]
+        titleLabel.textColor = dark ? .white : .label
+        subtitleLabel.textColor = dark ? .white : .secondaryLabel
+        for label in [titleLabel, subtitleLabel] {
+            label.layer.shadowColor = UIColor.black.cgColor
+            label.layer.shadowOpacity = dark ? 0.25 : 0
+            label.layer.shadowRadius = 6
+            label.layer.shadowOffset = .zero
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.frame = bounds
+        CATransaction.commit()
+        titleLabel.sizeToFit()
+        subtitleLabel.sizeToFit()
+        let maxWidth = bounds.width - leading - 140   // 오른쪽 버튼 자리는 비움
+        titleLabel.frame = CGRect(x: leading, y: titleCenterY - titleLabel.bounds.height / 2,
+                                  width: min(titleLabel.bounds.width, maxWidth), height: titleLabel.bounds.height)
+        subtitleLabel.frame = CGRect(x: leading + 1, y: titleLabel.frame.maxY - 2,
+                                     width: min(subtitleLabel.bounds.width, bounds.width - leading * 2),
+                                     height: subtitleLabel.bounds.height)
     }
 }

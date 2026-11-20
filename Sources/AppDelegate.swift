@@ -27,22 +27,22 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
 
         let library = GridViewController(folder: Folder(id: "all", title: "보관함", symbol: "photo.on.rectangle", section: .auto),
                                          isRoot: true)
-        let libraryNav = UINavigationController(rootViewController: library)
+        let libraryNav = TopStyledNavigationController(rootViewController: library)
         libraryNav.navigationBar.prefersLargeTitles = true
         libraryNav.tabBarItem = UITabBarItem(title: "보관함", image: UIImage(systemName: "photo.on.rectangle"), tag: 0)
 
-        let albumsNav = UINavigationController(rootViewController: FoldersViewController(mode: .top))
+        let albumsNav = TopStyledNavigationController(rootViewController: FoldersViewController(mode: .top))
         albumsNav.navigationBar.prefersLargeTitles = true
         albumsNav.tabBarItem = UITabBarItem(title: "앨범", image: UIImage(systemName: "rectangle.stack"), tag: 1)
 
         let unsorted = GridViewController(folder: Folder(id: "unsorted", title: "미분류", symbol: "tray", section: .auto),
                                           isRoot: true)
-        let unsortedNav = UINavigationController(rootViewController: unsorted)
+        let unsortedNav = TopStyledNavigationController(rootViewController: unsorted)
         unsortedNav.navigationBar.prefersLargeTitles = true
         unsortedNav.tabBarItem = UITabBarItem(title: "미분류", image: UIImage(systemName: "tray"), tag: 3)
 
         let hidden = FoldersViewController(mode: .hidden)
-        let hiddenNav = UINavigationController(rootViewController: hidden)
+        let hiddenNav = TopStyledNavigationController(rootViewController: hidden)
         hiddenNav.navigationBar.prefersLargeTitles = true
         hiddenNav.tabBarItem = UITabBarItem(title: "숨긴 앨범", image: UIImage(systemName: "eye.slash"), tag: 2)
         self.hiddenRoot = hidden
@@ -69,4 +69,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
             hiddenRoot?.lock()
         }
     }
+}
+
+/// 상태 막대 모양(흰/검은 글자)을 맨 위 화면이 정하게 (보관함 위 어두운 제목에서 흰 글자)
+final class TopStyledNavigationController: UINavigationController {
+    override var childForStatusBarStyle: UIViewController? { topViewController }
 }

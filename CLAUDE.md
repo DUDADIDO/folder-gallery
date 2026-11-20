@@ -11,7 +11,7 @@ Everything up to and including the data-layer restructure has been written **wit
 - `Sources/AssetList.swift` — list type used by every screen. Backed by a `PHFetchResult` (library, user albums, videos, favourites), an array (classified groups from the background pass), or saved identifiers resolved in chunks of 500 (classified groups at launch). `version` changes only when membership or order changes.
 - `Sources/Library.swift` — snapshot of folders and lists. Quick snapshot at launch (album structure, covers, fetch-backed lists, saved group ids), then a full background pass that classifies and is the source of truth. `photoLibraryDidChange` patches fetch-backed lists and subtracts deleted/moved ids immediately, then schedules a full rebuild.
 - `Sources/Classifier.swift` — camera / saved / recording classification with an on-disk cache. Uses a private `importProperties` probe guarded by a marker file; do not loosen that guard.
-- `Sources/GridViewController.swift` — photo grid, `PhotoGridLayout` (1/3/5/7 columns, pinch zoom with a timed cross-fade when the column count switches), selection mode, album cover header, day sections for the root grids.
+- `Sources/GridViewController.swift` — photo grid, `PhotoGridLayout` (1/3/5/7 columns, pinch zoom with a timed cross-fade when the column count switches), selection mode, album cover header. Root grids (library, unsorted) follow iOS 27: oldest first with the newest at the bottom (opens at the bottom), no day headers, a large white title + date/count subtitle drawn over the photos with a dark gradient (`LibraryTitleOverlay`), and a sort/filter menu (all · favourites · videos).
 - `Sources/ViewerViewController.swift` — photo viewer (paging, zoom, info panel, Live Photo, inline video, thumbnail strip, its own bottom `UIToolbar`).
 - `Sources/PhotoTransition.swift` — custom grid ↔ viewer transition (only the photo flies; drag down to close follows the finger).
 - `Sources/FoldersViewController.swift` — album list (auto row + user album cards, real Photos folders, drag reorder, hidden tab lock). Album cards open with the system zoom transition; folders push sideways.
@@ -44,7 +44,7 @@ Check the scheme and project names against what `xcodegen generate` actually pro
 ## Verify first (written blind, never run)
 
 1. Launch: album tab appears at once; auto row and unsorted come from saved ids on the second launch; no crash when photos were deleted in the stock app in between.
-2. Library tab and albums open instantly; day headers in the root grids are correct before and after the background sections arrive; no jump.
+2. Library tab and albums open instantly and open at the newest photo (bottom); the subtitle shows the date under the title while scrolling and the count at the bottom; no jump when new photos arrive.
 3. Open/close a photo from an album (oldest-first and newest-first) and from deep in the library: the photo returns to the right cell. Paging, thumbnail strip, swipe at both ends.
 4. Delete and move-to-album from the viewer and from grid selection; favourite; date adjust; album sort toggle; sorter.
 5. Viewer chrome: the viewer's own bottom toolbar position and look, thumbnail strip position, tap to hide chrome, video controls, info panel; drag down to close — chrome fades with the finger and returns when the finger moves back; cancel restores everything; tab bar returns after closing.
