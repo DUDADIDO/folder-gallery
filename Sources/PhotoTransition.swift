@@ -103,6 +103,11 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
     private var touchInContainer: CGPoint = .zero
     private var pendingEnd: Bool?
 
+    /// 막대 전환의 시계. UIKit 은 내비게이션 막대(제목·버튼)를 바꾸는 애니메이션을 이 진행도에 붙여 돌림.
+    /// 없으면 끌어 닫을 때 막대가 손가락을 못 따라가고 처음부터 격자의 막대로 바뀌거나, 애니메이션이 멈춘 채 남음
+    private var barAnimator: UIViewPropertyAnimator?
+    private let barClock = UIView()
+
     init(operation: UINavigationController.Operation, interactive: Bool) {
         self.operation = operation
         self.isInteractive = interactive
@@ -115,6 +120,22 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         PhotoTransition.duration
     }
 
+    func interruptibleAnimator(using transitionContext: UIViewControllerContextTransitioning) -> UIViewImplicitlyAnimating {
+        if let barAnimator { return barAnimator }
+        // 보이지 않는 점 하나만 움직임 (진행도만 필요)
+        let clock = barClock
+        clock.isUserInteractionEnabled = false
+        clock.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+        clock.alpha = 0
+        if clock.superview == nil { transitionContext.containerView.addSubview(clock) }
+        let animator = UIViewPropertyAnimator(duration: transitionDuration(using: transitionContext), curve: .linear) {
+            clock.frame.origin.x = 1
+        }
+        animator.addCompletion { _ in clock.removeFromSuperview() }
+        barAnimator = animator
+        return animator
+    }
+
     // MARK: - 버튼으로 열고 닫기
 
     func animateTransition(using transitionContext: UIViewControllerContextTransitioning) {
@@ -124,6 +145,7 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
             return
         }
         let opening = self.opening
+        interruptibleAnimator(using: transitionContext).startAnimation()
         UIView.performWithoutAnimation {
             apply(progress: opening ? 0 : 1)
             placeFlight(opening ? (thumbRect ?? fittedRect) : fittedRect, cropped: opening && thumbRect != nil)
@@ -178,6 +200,7 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
             return
         }
         touchInContainer = transitionContext.containerView.convert(touchInWindow, from: nil)
+        interruptibleAnimator(using: transitionContext).pauseAnimation()
         started = true
         UIView.performWithoutAnimation {
             apply(progress: 1)
@@ -214,6 +237,7 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         if let bar = tabBar {
             UIView.performWithoutAnimation { bar.alpha = 1 - chrome }
         }
+        barAnimator?.fractionComplete = progress
         context.updateInteractiveTransition(progress)
     }
 
@@ -225,6 +249,12 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         }
         guard !ending else { return }
         ending = true
+        // 막대는 남은 만큼 마저 (닫힘) 또는 되돌아감 (취소). 사진 애니메이션(0.3초 남짓) 안에 끝남
+        if let barAnimator {
+            barAnimator.isReversed = !finish
+            barAnimator.continueAnimation(withTimingParameters: UICubicTimingParameters(animationCurve: .easeOut),
+                                          durationFactor: 0.9)
+        }
         if finish {
             context.finishInteractiveTransition()
             UIView.animate(withDuration: 0.34, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0,
