@@ -158,14 +158,16 @@ final class SearchViewController: UIViewController, UITableViewDataSource, UITab
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         title = "검색"
-        navigationItem.largeTitleDisplayMode = .always
-        navigationController?.navigationBar.prefersLargeTitles = true
-        // 따로 띄웠을 때만 닫기 (검색 탭 안에서는 없음)
-        if navigationController?.presentingViewController != nil {
-            navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
-                self?.dismiss(animated: true)
-            })
-        }
+        // 순정 iOS 27: 위 막대 없이 맨 위에 큰 "검색", 결과가 있으면 그 밑에 [사진(N) | 모음(N)]
+        bigTitle.text = "검색"
+        bigTitle.font = .systemFont(ofSize: 34, weight: .bold)
+        bigTitle.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(bigTitle)
+        segment.translatesAutoresizingMaskIntoConstraints = false
+        segment.selectedSegmentIndex = 0
+        segment.isHidden = true
+        segment.addAction(UIAction { [weak self] _ in self?.applyResultMode() }, for: .valueChanged)
+        view.addSubview(segment)
 
         // 순정 검색 화면처럼 흰 바탕
         tableView.backgroundColor = .systemBackground
@@ -182,14 +184,42 @@ final class SearchViewController: UIViewController, UITableViewDataSource, UITab
         searchBar.delegate = self
         searchBar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(searchBar)
+        // 검색창 옆 X (순정): 검색을 끝냄
+        var close = UIButton.Configuration.plain()
+        if #available(iOS 26.0, *) { close = .glass() }
+        close.image = UIImage(systemName: "xmark", withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .medium))
+        close.cornerStyle = .capsule
+        closeButton.configuration = close
+        closeButton.tintColor = .label
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.addAction(UIAction { [weak self] _ in self?.endSearch() }, for: .primaryActionTriggered)
+        view.addSubview(closeButton)
+        resultsContainer.translatesAutoresizingMaskIntoConstraints = false
+        resultsContainer.isHidden = true
+        view.addSubview(resultsContainer)
+        tableTop = tableView.topAnchor.constraint(equalTo: bigTitle.bottomAnchor, constant: 4)
         NSLayoutConstraint.activate([
-            tableView.topAnchor.constraint(equalTo: view.topAnchor),
+            bigTitle.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 2),
+            bigTitle.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            segment.topAnchor.constraint(equalTo: bigTitle.bottomAnchor, constant: 14),
+            segment.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            segment.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
+            segment.heightAnchor.constraint(equalToConstant: 44),
+            tableTop,
             tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             tableView.bottomAnchor.constraint(equalTo: searchBar.topAnchor),
-            searchBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            searchBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-            searchBar.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -4),
+            resultsContainer.topAnchor.constraint(equalTo: segment.bottomAnchor, constant: 10),
+            resultsContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            resultsContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            resultsContainer.bottomAnchor.constraint(equalTo: searchBar.topAnchor),
+            searchBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
+            searchBar.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: 0),
+            searchBar.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: 2),
+            closeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+            closeButton.centerYAnchor.constraint(equalTo: searchBar.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 48),
+            closeButton.heightAnchor.constraint(equalToConstant: 48),
         ])
 
         let list = Library.shared.list(for: "all", newestFirst: false)
@@ -199,10 +229,85 @@ final class SearchViewController: UIViewController, UITableViewDataSource, UITab
         }
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        navigationController?.setNavigationBarHidden(true, animated: animated)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        // 결과 사진을 열 때는 보기 화면이 제 막대를 씀
+        navigationController?.setNavigationBarHidden(false, animated: animated)
+        returningFromChild = navigationController?.topViewController !== self && navigationController?.viewControllers.contains(self) == true
+        if returningFromChild { searchBar.resignFirstResponder() }
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        searchBar.becomeFirstResponder()
+        // 처음 들어올 때만 바로 입력 (결과 사진을 보고 돌아올 때는 키보드 없이)
+        if !returningFromChild { searchBar.becomeFirstResponder() }
+        returningFromChild = false
         refreshHome()
+    }
+
+    private var returningFromChild = false
+    private let bigTitle = UILabel()
+    private let closeButton = UIButton(type: .system)
+    private let segment = UISegmentedControl(items: ["사진", "모음"])
+    private let resultsContainer = UIView()
+    private var resultsGrid: SearchResultsViewController?
+    private var tableTop: NSLayoutConstraint!
+
+    /// X: 검색을 끝냄 (따로 띄웠으면 닫고, 탭이면 글자를 지우고 보관함으로)
+    private func endSearch() {
+        searchBar.text = nil
+        searchBar(searchBar, textDidChange: "")
+        searchBar.resignFirstResponder()
+        if navigationController?.presentingViewController != nil {
+            dismiss(animated: true)
+        } else {
+            tabBarController?.selectedIndex = 0
+        }
+    }
+
+    /// 결과: [사진(N) | 모음(N)]. 사진은 맞는 사진을 모두 모은 격자, 모음은 앨범·날짜·장소·종류 줄
+    private func updateResultMode() {
+        let searching = !showingRecent
+        var seen = Set<String>()
+        var photos: [PHAsset] = []
+        for hit in hits {
+            let list = hit.folderID.map { Library.shared.list(for: $0, newestFirst: false).array() } ?? hit.assets
+            for asset in list where seen.insert(asset.localIdentifier).inserted { photos.append(asset) }
+        }
+        photos.sort { ($0.creationDate ?? .distantPast) < ($1.creationDate ?? .distantPast) }
+        segment.isHidden = !searching
+        segment.setTitle("사진(\(photos.count.formatted()))", forSegmentAt: 0)
+        segment.setTitle("모음(\(hits.count.formatted()))", forSegmentAt: 1)
+        tableTop.isActive = false
+        tableTop = searching
+            ? tableView.topAnchor.constraint(equalTo: segment.bottomAnchor, constant: 4)
+            : tableView.topAnchor.constraint(equalTo: bigTitle.bottomAnchor, constant: 4)
+        tableTop.isActive = true
+        if let old = resultsGrid {
+            old.willMove(toParent: nil)
+            old.view.removeFromSuperview()
+            old.removeFromParent()
+        }
+        let grid = SearchResultsViewController(title: searchBar.text ?? "", assets: photos)
+        addChild(grid)
+        grid.view.frame = resultsContainer.bounds
+        grid.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        resultsContainer.addSubview(grid.view)
+        grid.didMove(toParent: self)
+        resultsGrid = grid
+        applyResultMode()
+    }
+
+    private func applyResultMode() {
+        let searching = !showingRecent
+        let photos = searching && segment.selectedSegmentIndex == 0
+        resultsContainer.isHidden = !photos
+        tableView.isHidden = photos
     }
 
     // MARK: 첫 화면 (순정: 최근 항목 사진 카드 + 추천 칩)
@@ -259,6 +364,7 @@ final class SearchViewController: UIViewController, UITableViewDataSource, UITab
                 guard let self, token == self.searchToken else { return }
                 self.hits = found
                 self.tableView.reloadData()
+                self.updateResultMode()
             }
         }
     }
@@ -271,7 +377,7 @@ final class SearchViewController: UIViewController, UITableViewDataSource, UITab
 
     func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
         if showingRecent { return nil }
-        return hits.isEmpty ? "결과 없음" : "결과"
+        return hits.isEmpty ? "결과 없음" : nil
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
