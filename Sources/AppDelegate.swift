@@ -48,6 +48,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
         self.hiddenRoot = hidden
         self.hiddenNav = hiddenNav
 
+        // 격자 ↔ 사진 보기 화면만 우리 전환 (사진만 날아가고 둘레는 서서히). 나머지 전환은 지금 그대로
+        for nav in [libraryNav, albumsNav, unsortedNav, hiddenNav] {
+            nav.delegate = PhotoNavigationDelegate.shared
+        }
+
         let tabs = UITabBarController()
         tabs.viewControllers = [libraryNav, albumsNav, unsortedNav, hiddenNav]
         tabs.selectedIndex = 1   // 켜면 앨범 탭부터

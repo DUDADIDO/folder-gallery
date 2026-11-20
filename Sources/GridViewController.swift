@@ -214,22 +214,349 @@ final class HeroHeaderView: UICollectionReusableView {
     }
 }
 
+/// 사진 격자 배치. 칸 수(1·3·5·7)마다 자리를 한 번 계산해 두고 (묶음마다 맨 위 높이만 — 사진 수와 상관없이 빠름),
+/// 두 손가락으로 벌리고 오므리는 동안은 두 칸 수의 자리를 progress 만큼 섞어서 보여 줌 (칸이 손가락을 따라 커지고 작아짐).
+/// 섞는 동안의 스크롤 위치도 두 칸 수 각각의 위치를 같은 비율로 섞음 → 화면에서도 두 배치 사이를 곧게 오감.
+/// 1칸은 사진마다 원래 비율로 화면 너비를 꽉 채움. 묶음마다 맨 위에 머리글(날짜) 또는 정사각형 앨범 표지
+final class PhotoGridLayout: UICollectionViewLayout {
+    /// 두 칸 수 사이를 섞는 중인 상태
+    struct Blend {
+        var from: Int
+        var to: Int
+        var progress: CGFloat
+        /// from·to 칸 수에서 각각 쓸 세로 스크롤 위치 (지금 위치는 이 둘을 progress 만큼 섞은 것)
+        var fromOffset: CGFloat
+        var toOffset: CGFloat
+
+        var offset: CGFloat { fromOffset + (toOffset - fromOffset) * progress }
+    }
+
+    private struct Geometry {
+        let columns: Int
+        /// 왼쪽 시작
+        let x: CGFloat
+        let width: CGFloat
+        let side: CGFloat
+        let header: CGFloat
+        /// 묶음마다 맨 위(머리글 위). 마지막에 전체 높이가 하나 더 있음
+        var tops: [CGFloat] = []
+        /// 1칸일 때만: 사진(평평한 차례)마다 위·높이
+        var itemTops: [CGFloat] = []
+        var itemHeights: [CGFloat] = []
+
+        var height: CGFloat { tops.last ?? 0 }
+    }
+
+    static let spacing: CGFloat = 2
+
+    /// 지금 칸 수 (섞는 중이 아닐 때)
+    var columns = 5 {
+        didSet { if columns != oldValue { invalidateLayout() } }
+    }
+    var blend: Blend? {
+        didSet { invalidateLayout() }
+    }
+    /// 머리글 높이. nil 이면 앨범 표지 (화면 너비만 한 정사각형)
+    var headerHeight: CGFloat? = 42 {
+        didSet { cache.removeAll() }
+    }
+    /// 1칸에서 쓰는 사진 비율 (너비 ÷ 높이). 평평한 차례로 물음
+    var aspect: (Int) -> CGFloat = { _ in 1 }
+
+    private var counts: [Int] = []
+    private var starts: [Int] = []
+    private var cache: [Int: Geometry] = [:]
+    private var cachedWidth: CGFloat = -1
+    private var cachedOriginX: CGFloat = 0
+
+    /// 묶음마다 사진 수 (다시 불러올 때마다)
+    func setSections(_ counts: [Int]) {
+        self.counts = counts
+        var starts: [Int] = []
+        starts.reserveCapacity(counts.count)
+        var total = 0
+        for count in counts {
+            starts.append(total)
+            total += count
+        }
+        self.starts = starts
+        cache.removeAll()
+        invalidateLayout()
+    }
+
+    /// 사진이 놓이는 너비와 왼쪽 시작 (가로 화면에서 노치 쪽 안전 영역은 비움)
+    private var width: CGFloat {
+        guard let view = collectionView else { return 0 }
+        return max(0, view.bounds.width - view.safeAreaInsets.left - view.safeAreaInsets.right)
+    }
+
+    private var originX: CGFloat {
+        collectionView?.safeAreaInsets.left ?? 0
+    }
+
+    private func geometry(_ columns: Int) -> Geometry {
+        let width = self.width
+        let originX = self.originX
+        if width != cachedWidth || originX != cachedOriginX {
+            cache.removeAll()
+            cachedWidth = width
+            cachedOriginX = originX
+        }
+        if let cached = cache[columns] { return cached }
+        let spacing = PhotoGridLayout.spacing
+        let perRow = max(1, columns)
+        let side = perRow == 1 ? width : max(20, floor((width - spacing * CGFloat(perRow - 1)) / CGFloat(perRow)))
+        let header = headerHeight ?? width
+        var geometry = Geometry(columns: perRow, x: originX, width: width, side: side, header: header)
+        geometry.tops.reserveCapacity(counts.count + 1)
+        var y: CGFloat = 0
+        if perRow == 1 {
+            // 1칸만 사진마다 높이가 달라서 사진 수만큼 한 번 계산 (그 칸 수를 처음 쓸 때만)
+            let total = (starts.last ?? 0) + (counts.last ?? 0)
+            geometry.itemTops.reserveCapacity(total)
+            geometry.itemHeights.reserveCapacity(total)
+        }
+        for (section, count) in counts.enumerated() {
+            geometry.tops.append(y)
+            y += header
+            if perRow == 1 {
+                let base = starts[section]
+                for item in 0..<count {
+                    // 아주 길거나 납작한 사진은 적당히 자름 (가로 5:1 ~ 세로 1:2.5)
+                    let ratio = min(5, max(0.4, aspect(base + item)))
+                    let height = max(20, (width / ratio).rounded())
+                    geometry.itemTops.append(y)
+                    geometry.itemHeights.append(height)
+                    y += height + (item < count - 1 ? spacing : 0)
+                }
+            } else if count > 0 {
+                let rows = (count + perRow - 1) / perRow
+                y += CGFloat(rows) * side + CGFloat(rows - 1) * spacing
+            }
+        }
+        geometry.tops.append(y)
+        cache[columns] = geometry
+        return geometry
+    }
+
+    /// 그 칸 수에서 사진 한 칸의 너비 (1칸은 화면 너비)
+    func side(columns: Int) -> CGFloat {
+        geometry(columns).side
+    }
+
+    /// 그 칸 수에서 전체 높이
+    func contentHeight(columns: Int) -> CGFloat {
+        geometry(columns).height
+    }
+
+    /// 그 칸 수에서 사진 자리 (섞지 않은 자리)
+    func itemFrame(_ indexPath: IndexPath, columns: Int) -> CGRect? {
+        let geometry = self.geometry(columns)
+        guard indexPath.section < counts.count, indexPath.item >= 0, indexPath.item < counts[indexPath.section] else { return nil }
+        return itemFrame(section: indexPath.section, item: indexPath.item, geometry)
+    }
+
+    private func itemFrame(section: Int, item: Int, _ geometry: Geometry) -> CGRect {
+        if geometry.columns == 1 {
+            let flat = starts[section] + item
+            return CGRect(x: geometry.x, y: geometry.itemTops[flat], width: geometry.width, height: geometry.itemHeights[flat])
+        }
+        let step = geometry.side + PhotoGridLayout.spacing
+        let row = item / geometry.columns, column = item % geometry.columns
+        return CGRect(x: geometry.x + CGFloat(column) * step, y: geometry.tops[section] + geometry.header + CGFloat(row) * step,
+                      width: geometry.side, height: geometry.side)
+    }
+
+    private func headerFrame(section: Int, _ geometry: Geometry) -> CGRect {
+        CGRect(x: geometry.x, y: geometry.tops[section], width: geometry.width, height: geometry.header)
+    }
+
+    /// rect 에 걸치는 사진·머리글. 묶음과 줄을 반으로 나눠 찾아서 보이는 만큼만 셈
+    private func elements(in rect: CGRect, _ geometry: Geometry, items: inout [IndexPath], headers: inout [Int]) {
+        let sectionCount = counts.count
+        guard sectionCount > 0, rect.maxY > 0, rect.minY < geometry.height else { return }
+        // 끝(tops[s + 1])이 rect 위쪽보다 아래인 첫 묶음
+        var low = 0, high = sectionCount
+        while low < high {
+            let mid = (low + high) / 2
+            if geometry.tops[mid + 1] > rect.minY { high = mid } else { low = mid + 1 }
+        }
+        var section = low
+        let step = geometry.side + PhotoGridLayout.spacing
+        while section < sectionCount && geometry.tops[section] < rect.maxY {
+            if headerFrame(section: section, geometry).intersects(rect) { headers.append(section) }
+            let count = counts[section]
+            if count > 0 {
+                if geometry.columns == 1 {
+                    let base = starts[section]
+                    var lo = base, hi = base + count
+                    while lo < hi {
+                        let mid = (lo + hi) / 2
+                        if geometry.itemTops[mid] + geometry.itemHeights[mid] > rect.minY { hi = mid } else { lo = mid + 1 }
+                    }
+                    var flat = lo
+                    while flat < base + count && geometry.itemTops[flat] < rect.maxY {
+                        items.append(IndexPath(item: flat - base, section: section))
+                        flat += 1
+                    }
+                } else {
+                    let top = geometry.tops[section] + geometry.header
+                    let rows = (count + geometry.columns - 1) / geometry.columns
+                    let firstRow = max(0, Int(floor((rect.minY - top) / step)))
+                    let lastRow = min(rows - 1, Int(floor((rect.maxY - top) / step)))
+                    if firstRow <= lastRow {
+                        let first = firstRow * geometry.columns
+                        let end = min(count, (lastRow + 1) * geometry.columns)
+                        if first < end {
+                            for item in first..<end {
+                                items.append(IndexPath(item: item, section: section))
+                            }
+                        }
+                    }
+                }
+            }
+            section += 1
+        }
+    }
+
+    override func prepare() {
+        super.prepare()
+        if width != cachedWidth || originX != cachedOriginX {
+            cache.removeAll()
+            cachedWidth = width
+            cachedOriginX = originX
+        }
+    }
+
+    override var collectionViewContentSize: CGSize {
+        let fullWidth = collectionView?.bounds.width ?? 0
+        if let blend {
+            let from = geometry(blend.from).height, to = geometry(blend.to).height
+            return CGSize(width: fullWidth, height: from + (to - from) * blend.progress)
+        }
+        return CGSize(width: fullWidth, height: geometry(columns).height)
+    }
+
+    override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+        guard !counts.isEmpty else { return [] }
+        var items: [IndexPath] = []
+        var headers: [Int] = []
+        guard let blend else {
+            let geometry = self.geometry(columns)
+            elements(in: rect, geometry, items: &items, headers: &headers)
+            var result = headers.map { headerAttributes(section: $0, from: geometry, to: nil, progress: 0) }
+            result.append(contentsOf: items.map { itemAttributes($0, from: geometry, to: nil, progress: 0) })
+            return result
+        }
+        // 섞는 중: 지금 화면에 걸치는 것은 두 칸 수 각각의 같은 화면 자리에 걸치는 것들 안에 다 있음
+        // (사진 순서가 두 배치에서 같고, 손가락 아래 사진이 두 배치 모두에서 화면 안이라서)
+        let from = geometry(blend.from), to = geometry(blend.to)
+        let current = blend.offset
+        elements(in: rect.offsetBy(dx: 0, dy: blend.fromOffset - current), from, items: &items, headers: &headers)
+        elements(in: rect.offsetBy(dx: 0, dy: blend.toOffset - current), to, items: &items, headers: &headers)
+        var result: [UICollectionViewLayoutAttributes] = []
+        var seenItems = Set<IndexPath>()
+        var seenHeaders = Set<Int>()
+        for section in headers where seenHeaders.insert(section).inserted {
+            let attributes = headerAttributes(section: section, from: from, to: to, progress: blend.progress)
+            if attributes.frame.intersects(rect) { result.append(attributes) }
+        }
+        for path in items where seenItems.insert(path).inserted {
+            let attributes = itemAttributes(path, from: from, to: to, progress: blend.progress)
+            if attributes.frame.intersects(rect) { result.append(attributes) }
+        }
+        return result
+    }
+
+    private func itemAttributes(_ path: IndexPath, from: Geometry, to: Geometry?, progress: CGFloat) -> UICollectionViewLayoutAttributes {
+        let attributes = UICollectionViewLayoutAttributes(forCellWith: path)
+        let start = itemFrame(section: path.section, item: path.item, from)
+        if let to {
+            attributes.frame = Geo.lerp(start, itemFrame(section: path.section, item: path.item, to), progress)
+        } else {
+            attributes.frame = start
+        }
+        return attributes
+    }
+
+    private func headerAttributes(section: Int, from: Geometry, to: Geometry?, progress: CGFloat) -> UICollectionViewLayoutAttributes {
+        let attributes = UICollectionViewLayoutAttributes(forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
+                                                          with: IndexPath(item: 0, section: section))
+        let start = headerFrame(section: section, from)
+        attributes.frame = to.map { Geo.lerp(start, headerFrame(section: section, $0), progress) } ?? start
+        attributes.zIndex = 1
+        return attributes
+    }
+
+    override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
+        guard indexPath.section < counts.count, indexPath.item >= 0, indexPath.item < counts[indexPath.section] else { return nil }
+        if let blend {
+            return itemAttributes(indexPath, from: geometry(blend.from), to: geometry(blend.to), progress: blend.progress)
+        }
+        return itemAttributes(indexPath, from: geometry(columns), to: nil, progress: 0)
+    }
+
+    override func layoutAttributesForSupplementaryView(ofKind elementKind: String,
+                                                       at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
+        guard elementKind == UICollectionView.elementKindSectionHeader, indexPath.section < counts.count else { return nil }
+        if let blend {
+            return headerAttributes(section: indexPath.section, from: geometry(blend.from), to: geometry(blend.to),
+                                    progress: blend.progress)
+        }
+        return headerAttributes(section: indexPath.section, from: geometry(columns), to: nil, progress: 0)
+    }
+
+    override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
+        newBounds.width != collectionView?.bounds.width
+    }
+
+    override func invalidateLayout(with context: UICollectionViewLayoutInvalidationContext) {
+        super.invalidateLayout(with: context)
+        // 안전 영역(가로 화면의 노치)이 바뀌었으면 다시 계산
+        if originX != cachedOriginX { cache.removeAll() }
+    }
+}
+
 /// 사진 격자. 보관함·미분류 탭은 날짜별로, 앨범 안은 순정 사진 앱처럼 큰 대표 사진 아래 이어서 보여 줌.
 /// 길게 누르거나 '선택' 뒤 옆으로 끌면 여러 장 선택
-final class GridViewController: UIViewController, UICollectionViewDataSource, UICollectionViewDelegate, UICollectionViewDataSourcePrefetching {
+final class GridViewController: UIViewController, UICollectionViewDataSource, UICollectionViewDelegate,
+                                UICollectionViewDataSourcePrefetching, UIGestureRecognizerDelegate {
     private let folder: Folder
     private var assets: [PHAsset] = []
     private var assetIDs: [String] = []
     private var sections: [(day: Date, range: Range<Int>)] = []
     private var collectionView: UICollectionView!
+    private let gridLayout = PhotoGridLayout()
     private let emptyLabel = UILabel()
     private var selecting = false
     private var thumbSize = CGSize(width: 240, height: 240)
     private let isRoot: Bool
     private var selectedPerSection: [Int: Int] = [:]
-    private var layoutAnchor: IndexPath?   // 칸 수를 바꾸는 동안 가운데 남길 사진
-    private let columnChoices = [3, 4, 5, 7]
-    private var columns = 4
+    /// 두 손가락으로 오갈 수 있는 칸 수 (순정처럼: 앨범 안 5 → 3 → 1, 보관함·미분류 7 → 5 → 3 → 1)
+    private let levels: [Int]
+    private var columns = 5
+    private var pinchRecognizer: UIPinchGestureRecognizer?
+
+    /// 두 손가락으로 칸 수를 바꾸는 중의 상태
+    private struct PinchState {
+        /// 지금 기준 칸 수 (levels 안의 차례). 한 번에 여러 단계를 넘어가면 바뀜
+        var base: Int
+        /// 기준 칸 수일 때의 손가락 벌림 (gesture.scale)
+        var startScale: CGFloat
+        /// 벌리거나 오므려서 가는 칸 수 (levels 안의 차례). 더 갈 곳이 없으면 nil
+        var target: Int?
+        /// 기준(0) ~ 가는 칸 수(1)
+        var progress: CGFloat
+        /// 손가락 아래 사진과 그 사진 안에서 손가락의 세로 위치 (0 위 ~ 1 아래)
+        var anchor: IndexPath
+        var anchorFraction: CGFloat
+        /// 손가락의 세로 위치 (격자 화면 위쪽 기준)
+        var fingerY: CGFloat
+    }
+    private var pinch: PinchState?
+    /// 손을 뗀 뒤 가까운 칸 수로 자리 잡는 움직임
+    private var settleLink: CADisplayLink?
+    private var settle: (from: CGFloat, to: CGFloat, start: CFTimeInterval, duration: CFTimeInterval)?
     /// 화면 전환(확대 전환 포함) 중인지. 이때 온 보관함 변경은 전환이 끝난 뒤에 반영
     private var transitioning = false
     private var reloadPending = false
@@ -264,10 +591,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     init(folder: Folder, isRoot: Bool = false) {
         self.folder = folder
         self.isRoot = isRoot
+        levels = isRoot ? [1, 3, 5, 7] : [1, 3, 5]
         super.init(nibName: nil, bundle: nil)
         // 앨범 안에서도 순정처럼 아래 탭 막대를 그대로 둠 (닫히는 확대 전환 끝에서 화면이 덜컥이지 않게)
-        let saved = isRoot ? Prefs.gridColumns : Prefs.albumGridColumns
-        columns = columnChoices.contains(saved) ? saved : (isRoot ? 4 : 5)
+        var saved = isRoot ? Prefs.gridColumns : Prefs.albumGridColumns
+        if saved == 4 { saved = 3 }   // 예전의 4칸은 3칸으로
+        columns = levels.contains(saved) ? saved : (isRoot ? 3 : 5)
     }
 
     required init?(coder: NSCoder) {
@@ -284,7 +613,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         view.addSubview(backdrop)
         navigationItem.largeTitleDisplayMode = isRoot ? .always : .never
 
-        collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: makeLayout())
+        // 앨범 표지는 정사각형 (앨범 카드와 같은 모양이라 확대 전환이 딱 맞음)
+        gridLayout.headerHeight = isRoot ? 42 : nil
+        gridLayout.columns = columns
+        gridLayout.aspect = { [weak self] flat in
+            guard let self, flat >= 0, flat < self.assets.count else { return 1 }
+            let asset = self.assets[flat]
+            guard asset.pixelWidth > 0, asset.pixelHeight > 0 else { return 1 }
+            return CGFloat(asset.pixelWidth) / CGFloat(asset.pixelHeight)
+        }
+        collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: gridLayout)
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         collectionView.backgroundColor = .clear
         collectionView.dataSource = self
@@ -315,8 +653,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         press.minimumPressDuration = 0.35
         collectionView.addGestureRecognizer(press)
 
-        // 두 손가락으로 벌리고 오므려 칸 수 바꾸기
-        collectionView.addGestureRecognizer(UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:))))
+        // 두 손가락으로 벌리고 오므려 칸 수 바꾸기 (손가락을 따라 칸이 커지고 작아짐)
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
+        pinch.delegate = self
+        collectionView.addGestureRecognizer(pinch)
+        pinchRecognizer = pinch
 
         toolbarItems = [shareItem, UIBarButtonItem.flexibleSpace(), moreItem, UIBarButtonItem.flexibleSpace(), deleteItem]
 
@@ -327,6 +668,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateThumbSize()
+    }
+
+    /// 썸네일을 받을 크기: 지금 칸 수의 한 칸 (1칸이면 화면 너비). 칸 수가 정해질 때만 바뀜 (손가락을 움직이는 동안은 그대로)
+    private func updateThumbSize() {
         let scale = traitCollection.displayScale
         let side = max(40, view.bounds.width / CGFloat(columns)) * scale
         thumbSize = CGSize(width: side, height: side)
@@ -335,7 +681,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         navigationController?.setNavigationBarHidden(false, animated: animated)
-        navigationController?.setToolbarHidden(!selecting, animated: animated)
+        // 보기 화면에서 돌아올 때(우리 사진 전환)는 보기 화면의 아래 막대를 전환이 서서히 지운 뒤 숨김 (여기서 밀어 내리지 않음)
+        if !isInPhotoTransition {
+            navigationController?.setToolbarHidden(!selecting, animated: animated)
+        }
         holdReloadsDuringTransition()
         blockSwipeAnywhereIfAlbum()
         expandCoverAlongsideOpening(animated: animated)
@@ -351,6 +700,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        // 칸 수를 바꾸던 중이면 가까운 칸 수로 바로 마침
+        finishPinchNow()
         holdReloadsDuringTransition()
         navigationController?.setBackSwipe(blocked: nil, by: self)
         // 선택 모드인 채로 닫히면(앨범이 지워짐 등) 뒤 화면에 막힌 채로 남지 않게
@@ -476,52 +827,220 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 앨범 화면을 닫는 확대 전환을 시작해도 되는지. 왼쪽 가장자리에서 오른쪽으로 밀기, 또는 맨 위에서 아래로 끌기만.
     /// (가운데를 옆으로 쓸기는 안 됨)
     func allowsZoomDismiss(location: CGPoint, velocity: CGPoint) -> Bool {
-        if selecting { return false }
+        if selecting || isPinching { return false }
         if location.x <= 44 && velocity.x > 0 && velocity.x > abs(velocity.y) { return true }
         guard ZoomGesture.isDownward(velocity), isViewLoaded, collectionView != nil else { return false }
         let top = -collectionView.adjustedContentInset.top
         return collectionView.contentOffset.y <= top + 1
     }
 
+    // MARK: - 두 손가락으로 칸 수 바꾸기 (순정처럼 손가락을 따라 칸이 커지고 작아지다가, 놓으면 가까운 칸 수로)
+
+    /// 칸 수를 바꾸는 중(손가락이 닿아 있거나, 놓은 뒤 자리 잡는 중)인지
+    private var isPinching: Bool {
+        pinch != nil || settleLink != nil
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === pinchRecognizer else { return true }
+        // 선택 중에는 칸 수를 바꾸지 않음 (두 손가락으로 끌어 고르기·길게 누르기와 부딪히지 않게). 화면 전환 중에도
+        return !selecting && !transitioning && !sections.isEmpty && collectionView != nil
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // 스크롤이 먼저 잡혀도 벌리기가 시작될 수 있게. 벌리기가 시작되면 스크롤을 끔 (beginPinch)
+        gestureRecognizer === pinchRecognizer && otherGestureRecognizer === collectionView?.panGestureRecognizer
+    }
+
     @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
-        guard gesture.state == .ended, let index = columnChoices.firstIndex(of: columns) else { return }
-        var next = index
-        if gesture.scale > 1.25 {
-            next = max(0, index - 1)                         // 벌리면 크게
-        } else if gesture.scale < 0.8 {
-            next = min(columnChoices.count - 1, index + 1)   // 오므리면 작게
-        }
-        guard next != index else { return }
-        // 보고 있던 자리를 기억했다가 칸 수를 바꾼 뒤 그 사진으로 돌아감
-        let anchor = collectionView.indexPathForItem(at: gesture.location(in: collectionView))
-            ?? collectionView.indexPathsForVisibleItems.min()
-        columns = columnChoices[next]
-        if isRoot {
-            Prefs.gridColumns = columns
-        } else {
-            Prefs.albumGridColumns = columns
-        }
-        Thumbs.manager.stopCachingImagesForAllAssets()
-        view.setNeedsLayout()
-        // 칸이 커지고 작아지는 것이 보이게 움직이면서 바꿈. 보던 사진이 가운데 남도록 아래 함수에서 자리를 잡음
-        layoutAnchor = anchor
-        collectionView.setCollectionViewLayout(makeLayout(), animated: true) { [weak self] _ in
-            self?.layoutAnchor = nil
+        switch gesture.state {
+        case .began:
+            beginPinch(gesture)
+        case .changed:
+            updatePinch(gesture)
+        case .ended:
+            endPinch(velocity: gesture.velocity, cancelled: false)
+        case .cancelled, .failed:
+            endPinch(velocity: 0, cancelled: true)
+        default:
+            break
         }
     }
 
-    func collectionView(_ collectionView: UICollectionView,
-                        targetContentOffsetForProposedContentOffset proposedContentOffset: CGPoint) -> CGPoint {
-        guard let anchor = layoutAnchor, anchor.section < sections.count, anchor.item < sections[anchor.section].range.count,
-              let frame = collectionView.collectionViewLayout.layoutAttributesForItem(at: anchor)?.frame else {
-            return proposedContentOffset
+    private func beginPinch(_ gesture: UIPinchGestureRecognizer) {
+        finishPinchNow()
+        guard let base = levels.firstIndex(of: columns), !sections.isEmpty else { return }
+        collectionView.layoutIfNeeded()
+        let point = gesture.location(in: collectionView)
+        guard let anchor = nearestItem(to: point), let frame = gridLayout.layoutAttributesForItem(at: anchor)?.frame else { return }
+        // 미끄러지던 스크롤을 그 자리에서 멈추고, 칸 수를 바꾸는 동안은 스크롤이 끼어들지 않게
+        collectionView.setContentOffset(collectionView.contentOffset, animated: false)
+        collectionView.panGestureRecognizer.isEnabled = false
+        let fraction = frame.height > 0 ? min(1, max(0, (point.y - frame.minY) / frame.height)) : 0.5
+        pinch = PinchState(base: base, startScale: max(0.01, gesture.scale), target: nil, progress: 0,
+                           anchor: anchor, anchorFraction: fraction,
+                           fingerY: point.y - collectionView.contentOffset.y)
+        applyPinch()
+    }
+
+    /// 손가락 아래의 사진 (사이 틈이나 머리글 위면 가장 가까운 사진)
+    private func nearestItem(to point: CGPoint) -> IndexPath? {
+        if let path = collectionView.indexPathForItem(at: point) { return path }
+        var best: (path: IndexPath, distance: CGFloat)?
+        for path in collectionView.indexPathsForVisibleItems {
+            guard let frame = gridLayout.layoutAttributesForItem(at: path)?.frame else { continue }
+            let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
+            let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
+            let distance = dx * dx + dy * dy
+            if best == nil || distance < (best?.distance ?? 0) { best = (path, distance) }
         }
-        let visible = collectionView.bounds.height
-        let top = -collectionView.adjustedContentInset.top
-        let content = collectionView.collectionViewLayout.collectionViewContentSize.height
-        let bottom = max(top, content + collectionView.adjustedContentInset.bottom - visible)
-        let y = min(max(top, frame.midY - visible / 2), bottom)
-        return CGPoint(x: proposedContentOffset.x, y: y)
+        return best?.path
+    }
+
+    private func updatePinch(_ gesture: UIPinchGestureRecognizer) {
+        guard var state = pinch, settleLink == nil else { return }
+        let point = gesture.location(in: collectionView)
+        state.fingerY = point.y - collectionView.contentOffset.y
+        // 칸 한 변이 손가락 벌림에 그대로 비례하게: 기준 칸 수의 한 변 × (지금 벌림 ÷ 기준 벌림)
+        var scale = gesture.scale / state.startScale
+        while true {
+            let step = scale > 1 ? -1 : (scale < 1 ? 1 : 0)   // 벌리면 칸 수가 적은 쪽(크게)
+            let target = state.base + step
+            guard step != 0, levels.indices.contains(target) else {
+                state.target = nil
+                state.progress = 0
+                break
+            }
+            let ratio = levelSide(target) / levelSide(state.base)
+            let progress = abs(ratio - 1) > 0.001 ? (scale - 1) / (ratio - 1) : 0
+            if progress >= 1, levels.indices.contains(target + step) {
+                // 다음 단계를 지나침: 그 칸 수를 새 기준으로 해서 이어감 (한 번에 5 → 3 → 1)
+                state.base = target
+                state.startScale *= ratio
+                scale = gesture.scale / state.startScale
+                continue
+            }
+            state.target = target
+            state.progress = min(1, max(0, progress))
+            break
+        }
+        pinch = state
+        applyPinch()
+    }
+
+    private func levelSide(_ index: Int) -> CGFloat {
+        max(1, gridLayout.side(columns: levels[index]))
+    }
+
+    /// 지금 상태를 격자에 반영: 두 칸 수의 자리를 섞고, 손가락 아래 사진이 손가락 아래에 남게 스크롤 위치를 맞춤
+    private func applyPinch() {
+        guard let state = pinch else { return }
+        let from = levels[state.base]
+        let to = state.target.map { levels[$0] } ?? from
+        let fromOffset = anchoredOffset(columns: from, state)
+        let toOffset = to == from ? fromOffset : anchoredOffset(columns: to, state)
+        let blend = PhotoGridLayout.Blend(from: from, to: to, progress: to == from ? 0 : state.progress,
+                                          fromOffset: fromOffset, toOffset: toOffset)
+        gridLayout.blend = blend
+        collectionView.contentOffset = CGPoint(x: collectionView.contentOffset.x, y: blend.offset)
+        collectionView.layoutIfNeeded()
+    }
+
+    /// 그 칸 수에서 손가락 아래 사진의 같은 점이 손가락 아래에 오는 스크롤 위치 (내용 끝을 넘지 않게)
+    private func anchoredOffset(columns: Int, _ state: PinchState) -> CGFloat {
+        let insets = collectionView.adjustedContentInset
+        let top = -insets.top
+        let bottom = max(top, gridLayout.contentHeight(columns: columns) + insets.bottom - collectionView.bounds.height)
+        guard let frame = gridLayout.itemFrame(state.anchor, columns: columns) else { return min(max(top, collectionView.contentOffset.y), bottom) }
+        let y = frame.minY + frame.height * state.anchorFraction - state.fingerY
+        return min(max(top, y), bottom)
+    }
+
+    private func endPinch(velocity: CGFloat, cancelled: Bool) {
+        collectionView.panGestureRecognizer.isEnabled = true
+        guard let state = pinch, settleLink == nil else { return }
+        guard let target = state.target else {
+            commitPinch(toTarget: false)
+            return
+        }
+        // 놓을 때의 빠르기까지 셈: 조금 더 갔을 자리가 절반을 넘으면 그 칸 수로
+        var finish = state.progress > 0.5
+        if !cancelled {
+            let ratio = levelSide(target) / levelSide(state.base)
+            let speed = abs(ratio - 1) > 0.001 ? velocity / state.startScale / (ratio - 1) : 0   // 초당 진행
+            finish = state.progress + speed * 0.15 > 0.5
+        }
+        let goal: CGFloat = finish ? 1 : 0
+        let distance = abs(goal - state.progress)
+        guard distance > 0.001 else {
+            commitPinch(toTarget: finish)
+            return
+        }
+        settle = (from: state.progress, to: goal, start: CACurrentMediaTime(), duration: 0.16 + 0.14 * Double(distance))
+        let link = CADisplayLink(target: self, selector: #selector(settleTick))
+        link.add(to: .main, forMode: .common)
+        settleLink = link
+    }
+
+    @objc private func settleTick() {
+        guard var state = pinch, let settle else {
+            commitPinch(toTarget: false)
+            return
+        }
+        let elapsed = (CACurrentMediaTime() - settle.start) / max(0.01, settle.duration)
+        let x = CGFloat(min(1, max(0, elapsed)))
+        let eased = 1 - pow(1 - x, 3)
+        state.progress = settle.from + (settle.to - settle.from) * eased
+        pinch = state
+        applyPinch()
+        if x >= 1 { commitPinch(toTarget: settle.to >= 1) }
+    }
+
+    /// 칸 수를 정함 (손가락 아래 사진은 그 자리 그대로). 바뀌었으면 저장하고 그 크기에 맞는 썸네일을 다시 받음
+    private func commitPinch(toTarget: Bool) {
+        settleLink?.invalidate()
+        settleLink = nil
+        settle = nil
+        guard let state = pinch else { return }
+        pinch = nil
+        let index = (toTarget ? state.target : nil) ?? state.base
+        let newColumns = levels[index]
+        let offset = anchoredOffset(columns: newColumns, state)
+        gridLayout.blend = nil
+        gridLayout.columns = newColumns
+        collectionView.contentOffset = CGPoint(x: collectionView.contentOffset.x, y: offset)
+        collectionView.layoutIfNeeded()
+        collectionView.panGestureRecognizer.isEnabled = true
+        if newColumns != columns {
+            let grew = newColumns < columns
+            columns = newColumns
+            if isRoot {
+                Prefs.gridColumns = columns
+            } else {
+                Prefs.albumGridColumns = columns
+            }
+            Thumbs.manager.stopCachingImagesForAllAssets()
+            updateThumbSize()
+            // 칸이 커졌으면 보이는 칸만 더 큰 썸네일로 (작아졌으면 지금 그림으로 충분)
+            if grew { reloadVisibleThumbnails() }
+        }
+        if reloadPending && !transitioning {
+            reloadPending = false
+            reloadFromLibrary(force: false)
+        }
+    }
+
+    /// 칸 수를 바꾸던 중이면 가까운 쪽으로 바로 마침 (다시 불러오기·화면 전환·선택 전에)
+    private func finishPinchNow() {
+        guard let state = pinch else {
+            settleLink?.invalidate()
+            settleLink = nil
+            settle = nil
+            return
+        }
+        let toTarget = settle.map { $0.to >= 1 } ?? (state.progress > 0.5)
+        commitPinch(toTarget: toTarget)
     }
 
     override func viewSafeAreaInsetsDidChange() {
@@ -532,36 +1051,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                                                                     bottom: view.safeAreaInsets.bottom, right: 0)
     }
 
-    private func makeLayout() -> UICollectionViewLayout {
-        let columns = self.columns
-        let hero = !isRoot
-        return UICollectionViewCompositionalLayout { _, environment in
-            // 칸 크기를 화면 너비에서 직접 계산 (비율 지정은 칸이 화면 전체 너비로 잡힘)
-            let spacing: CGFloat = 2
-            let width = environment.container.effectiveContentSize.width
-            let side = max(20, floor((width - spacing * CGFloat(columns - 1)) / CGFloat(columns)))
-            let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(widthDimension: .absolute(side),
-                                                                                 heightDimension: .absolute(side)))
-            let groupSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(side))
-            let group = NSCollectionLayoutGroup.horizontal(layoutSize: groupSize, subitems: [item])
-            group.interItemSpacing = .fixed(spacing)
-            let section = NSCollectionLayoutSection(group: group)
-            section.interGroupSpacing = spacing
-            // 앨범 표지는 정사각형 (앨범 카드와 같은 모양이라 확대 전환이 딱 맞음)
-            let headerHeight: CGFloat = hero ? width : 42
-            let headerSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(headerHeight))
-            let header = NSCollectionLayoutBoundarySupplementaryItem(layoutSize: headerSize,
-                                                                     elementKind: UICollectionView.elementKindSectionHeader,
-                                                                     alignment: .top)
-            section.boundarySupplementaryItems = [header]
-            return section
-        }
-    }
-
     // MARK: - 데이터
 
     @objc private func libraryChanged() {
-        if transitioning {
+        // 화면 전환 중이나 칸 수를 바꾸는 중에는 끝난 뒤에 반영
+        if transitioning || isPinching {
             reloadPending = true
             return
         }
@@ -569,6 +1063,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     private func reloadFromLibrary(force: Bool) {
+        finishPinchNow()
         let snapshot = Library.shared.snapshot
         if snapshot.loaded && !snapshot.folders.contains(where: { $0.id == folder.id }) && folder.isUser {
             // 폴더가 지워짐
@@ -591,6 +1086,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         assets = new
         assetIDs = newIDs
         buildSections()
+        gridLayout.setSections(sections.map { $0.range.count })
         collectionView.reloadData()
         if !Library.shared.canRead {
             emptyLabel.text = "사진 접근 권한이 필요해요.\n앨범 탭에서 설정을 열 수 있어요."
@@ -654,14 +1150,34 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         return CGRect(x: 0, y: 0, width: size.width, height: side)
     }
 
-    /// 확대 전환이 시작하고 돌아올 자리 (그 사진 칸의 그림 판). 화면 밖이면 nil
-    private func thumbnailView(forAssetID id: String) -> UIView? {
-        guard let flat = assetIDs.firstIndex(of: id) else { return nil }
-        for (section, entry) in sections.enumerated() where entry.range.contains(flat) {
-            let path = IndexPath(item: flat - entry.range.lowerBound, section: section)
-            return (collectionView.cellForItem(at: path) as? AssetCell)?.zoomSourceView
+    /// 그 사진의 칸 자리 (없으면 nil)
+    private func indexPath(forAssetID id: String) -> IndexPath? {
+        guard let flat = assetIDs.firstIndex(of: id),
+              let section = sections.firstIndex(where: { $0.range.contains(flat) }) else { return nil }
+        return IndexPath(item: flat - sections[section].range.lowerBound, section: section)
+    }
+
+    /// 사진 전환이 시작하고 돌아올 자리 (그 사진 칸의 그림 판). 화면 밖이면 nil
+    func thumbnailView(forAssetID id: String) -> UIView? {
+        guard isViewLoaded, collectionView != nil, let path = indexPath(forAssetID: id) else { return nil }
+        return (collectionView.cellForItem(at: path) as? AssetCell)?.zoomSourceView
+    }
+
+    /// 사진 전환(PhotoTransitionAnimator)이 쓸 칸의 그림 판과 그 썸네일.
+    /// reveal 이면(닫힐 때) 그 칸이 화면 밖이거나 막대에 가려 있으면 먼저 그 칸이 가운데 오게 스크롤함 (순정처럼)
+    func transitionSource(forAssetID id: String, reveal: Bool) -> (view: UIView, image: UIImage?)? {
+        guard isViewLoaded, collectionView != nil, let path = indexPath(forAssetID: id) else { return nil }
+        if reveal, let frame = gridLayout.layoutAttributesForItem(at: path)?.frame {
+            collectionView.layoutIfNeeded()
+            let visible = view.bounds.inset(by: view.safeAreaInsets)
+            let rect = collectionView.convert(frame, to: view)
+            if !visible.contains(rect) {
+                collectionView.scrollToItem(at: path, at: .centeredVertically, animated: false)
+                collectionView.layoutIfNeeded()
+            }
         }
-        return nil
+        guard let cell = collectionView.cellForItem(at: path) as? AssetCell else { return nil }
+        return (cell.zoomSourceView, cell.imageView.image)
     }
 
     /// '모든 사진에서 보기': 그 사진이 화면 가운데 오게 스크롤 (보관함 탭에서 씀)
@@ -717,12 +1233,36 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         cell.selecting = selecting
         applyZoomCollapse(to: cell)
         cell.setDuration(asset.mediaType == .video ? asset.duration : nil)
+        loadThumbnail(into: cell, asset: asset)
+        return cell
+    }
+
+    /// 지금 칸 수에 맞는 크기로 썸네일을 받음 (받는 동안은 지금 그림을 그대로 둠)
+    private func loadThumbnail(into cell: AssetCell, asset: PHAsset) {
+        let id = asset.localIdentifier
+        if cell.requestID != PHInvalidImageRequestID {
+            Thumbs.manager.cancelImageRequest(cell.requestID)
+        }
         cell.requestID = Thumbs.manager.requestImage(for: asset, targetSize: thumbSize, contentMode: .aspectFill,
-                                                     options: Thumbs.options) { [weak cell] image, _ in
+                                                     options: Thumbs.options) { [weak cell] image, info in
             guard let cell, cell.assetID == id, let image else { return }
+            // 먼저 오는 흐린 그림이 이미 있는 더 선명한 그림을 덮지 않게
+            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            if degraded, let current = cell.imageView.image,
+               current.size.width * current.scale >= image.size.width * image.scale { return }
             cell.imageView.image = image
         }
-        return cell
+    }
+
+    /// 칸이 커진 뒤 보이는 칸만 새 크기로 다시 받음 (손가락을 움직이는 동안이 아니라 칸 수가 정해질 때 한 번)
+    private func reloadVisibleThumbnails() {
+        for path in collectionView.indexPathsForVisibleItems {
+            guard path.section < sections.count, path.item < sections[path.section].range.count,
+                  let cell = collectionView.cellForItem(at: path) as? AssetCell else { continue }
+            let asset = assetAt(path)
+            guard cell.assetID == asset.localIdentifier else { continue }
+            loadThumbnail(into: cell, asset: asset)
+        }
     }
 
     func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String,
@@ -814,28 +1354,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             updateChrome()
         } else {
             collectionView.deselectItem(at: indexPath, animated: false)
+            // 칸 수를 바꾸는 중에는 열지 않음
+            guard !isPinching else { return }
             let viewer = ViewerViewController(assets: assets, index: flatIndex(indexPath), sourceAlbumID: folder.albumID)
             viewer.fallbackBounds = view.bounds
-            if #available(iOS 18.0, *) {
-                let options = UIViewController.Transition.ZoomOptions()
-                // 분명히 아래로 끌 때만 닫기 시작 (옆으로 빨리 넘기는 것이 닫기로 잡히지 않게).
-                // 정보 칸이 떠 있거나 확대 중일 때도 막음
-                options.interactiveDismissShouldBegin = { [weak viewer] context in
-                    guard let viewer else { return false }
-                    return viewer.allowsInteractiveDismiss(location: ZoomGesture.point(context.location),
-                                                           velocity: ZoomGesture.point(context.velocity))
-                }
-                // 흰 화면 전체가 아니라 사진이 보이는 자리만 썸네일과 맞춤. 뒤의 격자는 어둡게 하지 않음
-                // (바탕은 보기 화면이 스스로 서서히 나타나고 사라지게 함)
-                options.alignmentRectProvider = { [weak viewer] _ in
-                    viewer?.zoomAlignmentRect() ?? .zero
-                }
-                options.dimmingColor = .clear
-                viewer.preferredTransition = .zoom(options: options, sourceViewProvider: { [weak self, weak viewer] _ in
-                    guard let self, let id = viewer?.visibleAssetID else { return nil }
-                    return self.thumbnailView(forAssetID: id)
-                })
-            }
+            // 열고 닫는 전환은 내비게이션 delegate(PhotoNavigationDelegate)의 우리 전환:
+            // 사진만 이 칸에서 화면에 맞춘 자리로 커지고, 둘레(바탕·줄·막대)는 제자리에서 서서히.
+            // 시스템 확대 전환(preferredTransition = .zoom)은 보기 화면 전체를 카드처럼 키워서 쓰지 않음
             navigationController?.pushViewController(viewer, animated: true)
         }
     }
@@ -870,7 +1395,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     @objc private func longPressed(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began, !selecting else { return }
+        guard gesture.state == .began, !selecting, !isPinching else { return }
         let point = gesture.location(in: collectionView)
         guard let indexPath = collectionView.indexPathForItem(at: point) else { return }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -881,6 +1406,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     private func setSelecting(_ on: Bool) {
         guard selecting != on else { return }
+        finishPinchNow()
         if !on {
             for path in collectionView.indexPathsForSelectedItems ?? [] {
                 collectionView.deselectItem(at: path, animated: false)

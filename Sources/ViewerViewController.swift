@@ -324,9 +324,33 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
         if infoProgress != 0 { setInfoProgress(0) }
     }
 
-    /// iOS 17 에서 아래로 끌어 닫을 때 (우리 view 만 움직임)
+    /// 우리 전환으로 닫을 수 없을 때 아래로 끌어 닫는 동안 (우리 view 만 움직임)
     func setDismissDrag(_ transform: CGAffineTransform) {
         mediaClip.transform = transform
+    }
+
+    /// 사진 전환 동안 이 화면의 사진을 숨김 (날아가는 사진과 겹쳐 두 장으로 보이지 않게)
+    func setMediaHidden(_ hidden: Bool) {
+        guard isViewLoaded else { return }
+        mediaClip.isHidden = hidden
+    }
+
+    /// 지금 보이는 그림 (닫힐 때 날아가는 사진으로 씀)
+    var displayedImage: UIImage? {
+        isViewLoaded ? imageView.image : nil
+    }
+
+    /// 아직 그림이 안 왔으면 썸네일을 대신 보여 줌 (열기 전환이 끝났을 때 사진이 비어 보이지 않게. 큰 그림이 오면 바뀜)
+    func showPlaceholderIfEmpty(_ image: UIImage) {
+        guard isViewLoaded, imageView.image == nil else { return }
+        imageView.image = image
+    }
+
+    /// 사진 전환 전에 확대·끌기 변형을 바로 풀어 둠 (날아가는 사진이 화면에 맞춘 자리에서 시작하게)
+    func resetForTransition() {
+        guard isViewLoaded else { return }
+        mediaClip.transform = .identity
+        if isZoomed { zoomScroll.setZoomScale(1, animated: false) }
     }
 
     // MARK: - 불러오기
@@ -930,7 +954,7 @@ final class VideoControlsView: UIView {
 // MARK: - 보기 화면
 
 /// 좌우로 넘겨 보는 화면. 순정 사진 앱처럼 위에 장소(또는 날짜)·시간, 아래에 썸네일 줄과 막대.
-/// 아래로 끌면 닫히고(확대 전환), 위로 끌면 사진이 위쪽을 꽉 채우며 아래에 정보가 이어짐
+/// 아래로 끌면 사진이 손가락을 따라가다 격자의 썸네일로 닫히고(PhotoTransitionAnimator), 위로 끌면 사진이 위쪽을 꽉 채우며 아래에 정보가 이어짐
 final class ViewerViewController: UIPageViewController, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
     private var assets: [PHAsset]
     private var indexByID: [String: Int]
@@ -959,6 +983,12 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     /// 화면이 아직 안 만들어졌을 때 확대 전환이 쓸 크기 (여는 쪽에서 채움)
     var fallbackBounds: CGRect = .zero
+    /// 열릴 때 떠 둔 아래 탭 막대 그림 (여닫는 동안 탭 막대가 제자리에서 서서히 사라지고 나타나게)
+    var tabBarSnapshot: TabBarSnapshot?
+    /// 위 막대를 숨긴 채(사진만 보기) 닫혀서, 막대를 투명하게 꺼내 놓았는지 (전환이 서서히 보이게 함)
+    var navigationBarFadesIn = false
+    /// 아래로 끌어 닫는 중인 우리 전환
+    private var dismissDriver: PhotoTransitionAnimator?
 
     private lazy var shareItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: self, action: #selector(shareCurrent))
     private lazy var favoriteItem = UIBarButtonItem(image: UIImage(systemName: "heart"), style: .plain, target: self, action: #selector(toggleFavorite))
@@ -1057,14 +1087,14 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
         panGate.canBegin = { [weak self, weak pan] in
-            guard let self, let page = self.currentPage else { return false }
-            // 정보가 열려 있으면 사진 페이지 안의 스크롤이 맡음
-            if page.isZoomed || self.infoShown { return false }
-            // iOS 18 부터는 아래로 끌어 닫기를 시스템(확대 전환)이 함. 여기서는 위로 끌기만
-            if let pan, pan.velocity(in: self.view).y > 0 {
-                if #available(iOS 18.0, *) { return false }
+            guard let self, let pan, let page = self.currentPage else { return false }
+            let velocity = pan.velocity(in: self.view)
+            if velocity.y > 0 {
+                // 아래로: 닫기 (모든 iOS 에서 우리 전환이 손가락을 따라감). 분명히 아래로 끌 때만
+                return self.allowsInteractiveDismiss(location: pan.location(in: self.view), velocity: velocity)
             }
-            return true
+            // 위로: 정보 열기. 정보가 열려 있으면 사진 페이지 안의 스크롤이 맡음
+            return !page.isZoomed && !self.infoShown
         }
         pan.delegate = panGate
         pan.maximumNumberOfTouches = 1
@@ -1162,21 +1192,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         super.viewWillAppear(animated)
         // 보는 동안은 '밀어서 뒤로'(가장자리·어디서나)를 끔. 옆으로 빨리 넘기는 것이 뒤로 가기로 잡히지 않게
         navigationController?.setBackSwipe(blocked: .all, by: self)
-        // 다른 화면에서 돌아올 때도 숨김 상태를 그대로
-        navigationController?.setNavigationBarHidden(chromeHidden || infoShown, animated: animated)
-        navigationController?.setToolbarHidden(chromeHidden, animated: animated)
-        if isMovingToParent, animated, let coordinator = transitionCoordinator {
-            // 열릴 때: 사진만 썸네일에서 커지고 바탕과 줄·배지는 서서히
-            backdrop.alpha = 0
-            setChromeViewsAlpha(0)
-            coordinator.animate(alongsideTransition: { _ in
-                self.backdrop.alpha = 1
-                self.applyChromeAlpha()
-            }, completion: { _ in
-                self.backdrop.alpha = 1
-                self.applyChromeAlpha()
-            })
-        }
+        // 다른 화면에서 돌아올 때도 숨김 상태를 그대로.
+        // 격자에서 열릴 때(우리 사진 전환)는 막대를 밀어 올리지 않고 바로 꺼내 둠 — 투명도는 전환이 0 에서 1 로 바꿈
+        let slides = animated && !isInPhotoTransition
+        navigationController?.setNavigationBarHidden(chromeHidden || infoShown, animated: slides)
+        navigationController?.setToolbarHidden(chromeHidden, animated: slides)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -1196,6 +1216,16 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         // 떠날 때(닫힘·다른 화면을 엶) 다시 켬. 닫기를 취소하면 viewDidAppear 에서 다시 끔
         navigationController?.setBackSwipe(blocked: nil, by: self)
         guard isMovingFromParent else { return }
+        if isInPhotoTransition {
+            // 격자로 닫힘(우리 사진 전환): 아래 막대는 전환이 서서히 투명하게 한 뒤 숨김.
+            // 위 막대를 숨긴 채였으면 투명하게 꺼내 놓고 전환이 서서히 보이게 함 (격자가 막대를 밀어 내리지 않게)
+            if let navigation = navigationController, navigation.isNavigationBarHidden {
+                navigation.navigationBar.alpha = 0
+                navigation.setNavigationBarHidden(false, animated: false)
+                navigationBarFadesIn = true
+            }
+            return
+        }
         navigationController?.setNavigationBarHidden(false, animated: animated)
         navigationController?.setToolbarHidden(true, animated: animated)
         if let coordinator = transitionCoordinator {
@@ -1233,7 +1263,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     /// 지금 보고 있는 사진 (확대 전환이 돌아갈 칸을 찾는 데 씀)
     var visibleAssetID: String { currentID }
 
-    /// 시스템(확대 전환)의 '끌어내려 닫기'를 시작해도 되는지. location·velocity 는 끌기의 위치(이 화면 좌표)와 속도.
+    /// '끌어내려 닫기'를 시작해도 되는지. location·velocity 는 끌기의 위치(이 화면 좌표)와 속도.
     /// 분명히 아래로 끌 때만 — 옆으로 넘기기(빠르게 연달아 넘기는 것 포함)는 절대 닫기가 아님
     func allowsInteractiveDismiss(location: CGPoint, velocity: CGPoint) -> Bool {
         if infoShown || infoProgress > 0 { return false }
@@ -1260,6 +1290,37 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         }
         guard let asset = currentAsset, asset.pixelWidth > 0, asset.pixelHeight > 0 else { return bounds }
         return Geo.fit(CGSize(width: asset.pixelWidth, height: asset.pixelHeight), in: bounds)
+    }
+
+    // MARK: - 격자 ↔ 보기 화면 사진 전환 (PhotoTransitionAnimator 가 부름)
+
+    /// 지금 사진의 원래 크기 (날아가는 사진의 비율)
+    var transitionMediaSize: CGSize {
+        guard let asset = currentAsset, asset.pixelWidth > 0, asset.pixelHeight > 0 else { return .zero }
+        return CGSize(width: asset.pixelWidth, height: asset.pixelHeight)
+    }
+
+    /// 지금 사진 화면에 떠 있는 그림 (썸네일보다 선명함. 아직 없으면 nil)
+    var transitionImage: UIImage? {
+        currentPage?.displayedImage
+    }
+
+    /// 전환 직전: 확대·끌기 변형을 풀어서 사진이 화면에 맞춘 자리에 있게
+    func prepareForPhotoTransition() {
+        currentPage?.resetForTransition()
+    }
+
+    /// 사진이 날아가는 동안 이 화면의 사진을 숨김. 다시 보일 때 아직 그림이 없으면 placeholder(날아온 썸네일)를 대신
+    func setTransitionMediaHidden(_ hidden: Bool, placeholder: UIImage? = nil) {
+        if !hidden, let placeholder { currentPage?.showPlaceholderIfEmpty(placeholder) }
+        currentPage?.setMediaHidden(hidden)
+    }
+
+    /// 0: 바탕·썸네일 줄·배지가 다 투명 (뒤의 격자가 보임) ~ 1: 평소대로. 위·아래 막대는 전환이 따로 맞춤
+    func setTransitionAppearance(_ progress: CGFloat) {
+        guard isViewLoaded else { return }
+        backdrop.alpha = progress
+        setChromeViewsAlpha(chromeAlpha * progress)
     }
 
     private func makePage(_ index: Int) -> AssetPageViewController {
@@ -1418,8 +1479,13 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         videoControls.alpha = alpha
     }
 
+    /// 지금 상태에서 줄·배지가 보일 정도 (숨김 0, 정보를 열수록 옅어짐)
+    private var chromeAlpha: CGFloat {
+        (chromeHidden ? 0 : 1) * (1 - infoProgress)
+    }
+
     private func applyChromeAlpha() {
-        setChromeViewsAlpha((chromeHidden ? 0 : 1) * (1 - infoProgress))
+        setChromeViewsAlpha(chromeAlpha)
     }
 
     /// 썸네일 줄에서 고른 사진으로 바로 바꿈
@@ -1514,7 +1580,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         setInfo(!infoShown, animated: true)
     }
 
-    // MARK: - 세로로 끌기 (위: 정보 열기. 아래: iOS 17 에서는 닫기)
+    // MARK: - 세로로 끌기 (위: 정보 열기. 아래: 닫기 — 사진이 손가락을 따라가다 썸네일로)
 
     @objc private func panned(_ gesture: UIPanGestureRecognizer) {
         let move = gesture.translation(in: view)
@@ -1524,8 +1590,18 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             panDismissing = gesture.velocity(in: view).y > 0
             // 끄는 동안 옆 사진으로 넘어가지 않게
             pagingScrollView?.isScrollEnabled = false
-            if !panDismissing && chromeHidden { setChromeHidden(false, animated: true) }
+            if panDismissing {
+                // 격자 위에서 닫는 우리 전환을 시작 (뒤에 격자가 보이고 사진만 손가락을 따라감)
+                dismissDriver = (navigationController?.delegate as? PhotoNavigationDelegate)?
+                    .beginInteractiveClose(of: self, touch: gesture.location(in: nil))
+            } else if chromeHidden {
+                setChromeHidden(false, animated: true)
+            }
         case .changed:
+            if panDismissing, let driver = dismissDriver {
+                driver.update(translation: move)
+                return
+            }
             guard let page = pannedPage, !page.isZoomed else { return }
             if panDismissing {
                 let progress = min(1, max(0, move.y) / 320)
@@ -1540,7 +1616,13 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             let speed = gesture.velocity(in: view).y
             let page = pannedPage
             pannedPage = nil
-            if panDismissing {
+            if panDismissing, let driver = dismissDriver {
+                dismissDriver = nil
+                // 충분히 내렸거나 빠르게 내리며 놓으면 썸네일로 닫힘. 위로 튕기며 놓으면 제자리로
+                let close = speed > -200 && (move.y > 110 || (move.y > 30 && speed > 900) || speed > 1500)
+                if !close { pagingScrollView?.isScrollEnabled = !infoShown }
+                driver.end(finish: close)
+            } else if panDismissing {
                 if move.y > 110 || (move.y > 30 && speed > 900) {
                     navigationController?.popViewController(animated: true)
                 } else {
@@ -1559,7 +1641,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         case .cancelled, .failed:
             let page = pannedPage
             pannedPage = nil
-            if panDismissing {
+            if panDismissing, let driver = dismissDriver {
+                dismissDriver = nil
+                pagingScrollView?.isScrollEnabled = !infoShown
+                driver.end(finish: false)
+            } else if panDismissing {
                 page?.setDismissDrag(.identity)
                 backdrop.alpha = 1
                 applyChromeAlpha()
