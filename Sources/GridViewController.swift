@@ -812,6 +812,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         updateThumbSize()
         if isRoot {
             layoutTitleOverlay()
+            alignShortContentToBottom()
             updateModeBar()
             updateYearChip()
             if needsScrollToLatest, !list.isEmpty, view.bounds.height > 0 {
@@ -832,6 +833,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         guard folder.id == "all", !selecting, collectionView != nil else { return false }
         if moments != nil { return true }
         guard !list.isEmpty else { return false }
+        // 한 화면에 다 들어와 스크롤할 수 없으면 끝까지 오므렸을 때 늘 보이게 (안 그러면 년·월로 갈 길이 없음)
+        if columns == PhotoGridLayout.denseColumns,
+           collectionView.contentSize.height <= collectionView.bounds.height - collectionView.adjustedContentInset.bottom { return true }
         let inset = collectionView.adjustedContentInset
         let maxOffset = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
         let away = newestFirst ? collectionView.contentOffset.y - (-inset.top) : maxOffset - collectionView.contentOffset.y
@@ -853,7 +857,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     private func updateYearChip() {
         guard folder.id == "all", collectionView != nil else { return }
+        // 한 화면에 다 들어오면(아래에 붙은 짧은 목록) 칩 없이
         let show = columns == PhotoGridLayout.denseColumns && moments == nil && !list.isEmpty
+            && collectionView.contentInset.top < 1
         yearChip.isHidden = !show
         guard show else { return }
         let inset = collectionView.adjustedContentInset
@@ -874,9 +880,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let show = modeBarVisible
         if modeBar.isHidden == show {
             modeBar.isHidden = !show
-            if #available(iOS 18.0, *) {
-                tabBarController?.setTabBarHidden(show, animated: true)
-            }
+        }
+        // 탭 막대는 늘 막대와 반대로 (다른 곳에서 탭 막대를 다시 보이게 해도 맞춤)
+        if #available(iOS 18.0, *), let tabs = tabBarController,
+           navigationController?.topViewController === self, tabs.isTabBarHidden != show {
+            tabs.setTabBarHidden(show, animated: true)
         }
         if show {
             let height: CGFloat = 56
@@ -960,6 +968,18 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         updateThumbSize()
         collectionView.reloadData()
         collectionView.layoutIfNeeded()
+    }
+
+    /// 사진이 한 화면보다 적으면 순정처럼 최신이 있는 아래쪽에 붙임 (제목 밑에 가리지 않게)
+    private func alignShortContentToBottom() {
+        guard isRoot, !newestFirst, collectionView != nil else { return }
+        collectionView.layoutIfNeeded()
+        let visible = collectionView.bounds.height - collectionView.contentInset.bottom
+        let top = max(0, visible - collectionView.contentSize.height)
+        if abs(collectionView.contentInset.top - top) > 0.5 {
+            collectionView.contentInset.top = top
+            if top > 0 { collectionView.contentOffset.y = -top }
+        }
     }
 
     private func layoutTitleOverlay() {
@@ -1062,6 +1082,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if zoomCollapsed { setZoomCollapsed(false) }
         // 선택 중이 아니면 아래 막대는 숨기고 탭 막대는 보이게 (어긋난 채로 남지 않게. 맞으면 건드리지 않음)
         if !selecting { navigationController?.ensureBrowsingBars(of: self) }
+        updateModeBar()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -1484,6 +1505,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             updateThumbSize()
             // 칸이 커졌으면 보이는 칸만 더 큰 썸네일로 (작아졌으면 지금 그림으로 충분)
             if grew { reloadVisibleThumbnails() }
+            alignShortContentToBottom()
             updateModeBar()
             updateYearChip()
         }

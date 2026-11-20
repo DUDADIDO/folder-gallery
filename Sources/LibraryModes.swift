@@ -250,36 +250,53 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
                 layout.contentInsets = NSDirectionalEdgeInsets(top: 16, leading: 12, bottom: 16, trailing: 12)
                 return layout
             }
-            // 월: 첫 칸 2×2 + 오른쪽 세로 두 칸, 그 뒤로 한 줄 3칸
+            // 월 (순정 iOS 27 녹화와 비교): 달마다 배치가 다름
+            // 하루: 가로로 긴 큰 카드 하나 / 이틀: 반반 / 사흘 이상: 짝수 달은 가로로 긴 큰 카드 + 3칸 줄,
+            // 홀수 달은 왼쪽 작은 두 칸 + 오른쪽 2×2, 그 뒤로 3칸 줄
             let gap: CGFloat = 4
             let inset: CGFloat = 12
-            let side = floor((width - inset * 2 - gap * 2) / 3)
+            let full = width - inset * 2
+            let side = floor((full - gap * 2) / 3)
+            let wideHeight = (full * 0.62).rounded()
             let count = self?.data.months.indices.contains(section) == true ? self!.data.months[section].days.count : 0
             var groups: [NSCollectionLayoutGroup] = []
-            if count > 0 {
-                let big = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .absolute(side * 2 + gap), heightDimension: .absolute(side * 2 + gap)))
-                let small = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .absolute(side), heightDimension: .absolute(side)))
-                let rightCount = min(2, count - 1)
-                var heroItems: [NSCollectionLayoutItem] = [big]
-                if rightCount > 0 {
-                    let column = NSCollectionLayoutGroup.vertical(layoutSize: .init(widthDimension: .absolute(side), heightDimension: .absolute(side * 2 + gap)),
-                                                                  repeatingSubitem: small, count: rightCount)
-                    column.interItemSpacing = .fixed(gap)
-                    groups.append(NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .absolute(side * 2 + gap)),
-                                                                     subitems: [big, column]))
-                    groups[0].interItemSpacing = .fixed(gap)
-                } else {
-                    groups.append(NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .absolute(side * 2 + gap)),
-                                                                     subitems: heroItems))
-                }
-                heroItems.removeAll()
-                let rest = count - 1 - rightCount
-                if rest > 0 {
-                    let rows = (rest + 2) / 3
-                    let row = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .absolute(side)),
-                                                                 repeatingSubitem: small, count: 3)
+            func item(_ w: CGFloat, _ h: CGFloat) -> NSCollectionLayoutItem {
+                NSCollectionLayoutItem(layoutSize: .init(widthDimension: .absolute(w), heightDimension: .absolute(h)))
+            }
+            func rowsOfThree(_ n: Int) {
+                guard n > 0 else { return }
+                for start in stride(from: 0, to: n, by: 3) {
+                    let k = min(3, n - start)
+                    let row = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute(side)),
+                                                                 subitems: Array(repeating: item(side, side), count: k))
                     row.interItemSpacing = .fixed(gap)
-                    for _ in 0..<rows { groups.append(row) }
+                    groups.append(row)
+                }
+            }
+            if count == 1 {
+                groups.append(NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute(wideHeight)),
+                                                                 subitems: [item(full, wideHeight)]))
+            } else if count == 2 {
+                let half = floor((full - gap) / 2)
+                let pair = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute(half)),
+                                                              subitems: [item(half, half), item(half, half)])
+                pair.interItemSpacing = .fixed(gap)
+                groups.append(pair)
+            } else if count >= 3 {
+                if section % 2 == 0 {
+                    groups.append(NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute(wideHeight)),
+                                                                     subitems: [item(full, wideHeight)]))
+                    rowsOfThree(count - 1)
+                } else {
+                    let bigSide = side * 2 + gap
+                    let column = NSCollectionLayoutGroup.vertical(layoutSize: .init(widthDimension: .absolute(side), heightDimension: .absolute(bigSide)),
+                                                                  subitems: [item(side, side), item(side, side)])
+                    column.interItemSpacing = .fixed(gap)
+                    let hero = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute(bigSide)),
+                                                                  subitems: [column, item(bigSide, bigSide)])
+                    hero.interItemSpacing = .fixed(gap)
+                    groups.append(hero)
+                    rowsOfThree(count - 3)
                 }
             }
             let total = groups.reduce(CGFloat(0)) { $0 + $1.layoutSize.heightDimension.dimension } + CGFloat(max(0, groups.count - 1)) * gap
@@ -312,7 +329,7 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
                            size: CGSize(width: collectionView.bounds.width * scale, height: collectionView.bounds.width * 0.7 * scale))
         } else {
             let day = data.months[indexPath.section].days[indexPath.item]
-            let side = indexPath.item == 0 ? collectionView.bounds.width * 0.66 : collectionView.bounds.width / 3
+            let side = collectionView.bounds.width * (indexPath.item < 3 ? 0.7 : 0.34)
             cell.configure(asset: day.cover, title: "\(day.day)일", subtitle: nil, large: false,
                            size: CGSize(width: side * scale, height: side * scale))
         }
@@ -415,7 +432,7 @@ final class MonthHeaderView: UICollectionReusableView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        label.font = .systemFont(ofSize: 22, weight: .bold)
+        label.font = .systemFont(ofSize: 17, weight: .bold)
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
