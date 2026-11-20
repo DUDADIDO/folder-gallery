@@ -395,12 +395,27 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 닫힐 때: 전환과 함께 표지만 남기고 모서리가 카드처럼 둥글어짐. 닫기를 취소하면 되돌림
     private func collapseToCoverAlongsideClosing() {
-        guard isMovingFromParent, let coordinator = transitionCoordinator, coverIsInZoomRect else { return }
+        guard isMovingFromParent, let coordinator = transitionCoordinator,
+              opensWithZoom, !isRoot, isViewLoaded, collectionView != nil, !sections.isEmpty else { return }
+        // 아래로 넘겨 둔 채로 닫으면 표지가 화면 밖이라, 먼저 맨 위로 돌려놓고(표지가 제자리에 오게) 줄임.
+        // 닫기를 취소하면 보던 자리로 되돌림
+        let top = CGPoint(x: collectionView.contentOffset.x, y: -collectionView.adjustedContentInset.top)
+        let saved = collectionView.contentOffset
+        let scrolled = saved.y > top.y + 1
         coordinator.animate(alongsideTransition: { _ in
+            if scrolled {
+                UIView.performWithoutAnimation {
+                    self.collectionView.setContentOffset(top, animated: false)
+                    self.collectionView.layoutIfNeeded()
+                }
+            }
             self.setZoomCollapsed(true)
         }, completion: { context in
             if context.isCancelled {
-                UIView.performWithoutAnimation { self.setZoomCollapsed(false) }
+                UIView.performWithoutAnimation {
+                    self.setZoomCollapsed(false)
+                    if scrolled { self.collectionView.setContentOffset(saved, animated: false) }
+                }
             }
         })
     }
