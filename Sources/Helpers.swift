@@ -175,8 +175,8 @@ final class FolderPickerViewController: UITableViewController {
             let snapshot = Library.shared.snapshot
             let count = snapshot.items[folder.id]?.count ?? 0
             content.text = folder.title
-            // 켤 때의 임시 목록이면 장수를 모름
-            content.secondaryText = snapshot.partial ? nil : String(count)
+            // 켤 때의 임시 목록이면 장수를 모름 (사진 앱 앨범은 처음부터 진짜 목록이라 보통 나옴)
+            content.secondaryText = snapshot.isProvisional(folder.id) ? nil : String(count)
             content.image = UIImage(systemName: "folder")
         }
         cell.contentConfiguration = content

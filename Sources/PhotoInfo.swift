@@ -539,6 +539,7 @@ final class InfoPanelView: UIView {
     }
 
     private func load() {
+        loadAlbumNames()
         if details == nil {
             DetailsLoader.load(asset) { [weak self] found in
                 guard let self else { return }
@@ -570,6 +571,26 @@ final class InfoPanelView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         startMapIfNeeded(width: bounds.width - InfoPanelView.sideInset * 2)
+    }
+
+    /// 이 사진이 든 사진 앱 앨범 이름 (앨범 목록을 하나하나 훑지 않고 사진 앱에 물음. 뒤에서)
+    private func loadAlbumNames() {
+        let asset = self.asset
+        DispatchQueue.global(qos: .userInitiated).async {
+            let collections = PHAssetCollection.fetchAssetCollectionsContaining(asset, with: .album, options: nil)
+            var ids: [String] = []
+            collections.enumerateObjects { collection, _, _ in
+                ids.append(Folder.albumPrefix + collection.localIdentifier)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.asset.localIdentifier == asset.localIdentifier else { return }
+                // 앨범 목록에 있는 것만 (이름순 — 예전과 같은 차례)
+                let nodes = Library.shared.snapshot.nodes
+                self.albumNames = ids.compactMap { nodes[$0]?.title }
+                    .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+                self.rebuild()
+            }
+        }
     }
 
     /// 작은 지도 그림 (MapKit 스냅숏, 위치 권한 필요 없음)
@@ -932,19 +953,7 @@ final class InfoPanelView: UIView {
             self?.onAction?(.showInLibrary)
         })
 
-        // 5) 들어 있는 앨범 (이 앱에서 더한 것. 맨 끝)
-        // 켤 때의 임시 목록에는 앨범의 사진 목록이 없어서 그때는 정하지 않음
-        if albumNames == nil, !Library.shared.snapshot.partial {
-            let snapshot = Library.shared.snapshot
-            let id = asset.localIdentifier
-            var names: [String] = []
-            for folder in snapshot.folders where folder.isUser {
-                if snapshot.items[folder.id]?.contains(where: { $0.localIdentifier == id }) == true {
-                    names.append(folder.title)
-                }
-            }
-            albumNames = names
-        }
+        // 5) 들어 있는 앨범 (이 앱에서 더한 것. 맨 끝). 찾는 것은 load() 가 뒤에서
         let albums = albumNames ?? []
         let albumText: String
         if albumNames == nil {

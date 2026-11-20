@@ -246,7 +246,7 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         if mediaSize.width <= 0 || mediaSize.height <= 0 { mediaSize = fittedRect.size }
 
         // 닫을 때는 지금 보고 있는 사진의 칸으로 (화면 밖이면 격자가 먼저 그 칸이 보이게 스크롤)
-        let source = grid.transitionSource(forAssetID: id, reveal: !opening)
+        let source = grid.transitionSource(forAssetID: id, near: viewer.visibleAssetIndex, reveal: !opening)
         if let source {
             let rect = source.view.convert(source.view.bounds, to: container)
             if rect.width > 1, rect.height > 1, rect.intersects(container.bounds) {

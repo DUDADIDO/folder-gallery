@@ -26,8 +26,9 @@ struct Folder: Hashable {
 struct Snapshot {
     /// 자동 분류 앨범 + 사진 앱 앨범 전부(폴더 안에 있는 것도, 이름순)
     var folders: [Folder] = []
-    /// 앨범 ID → 사진(최신순). "all" = 보관함, "unsorted" = 어느 앨범에도 없는 사진
-    var items: [String: [PHAsset]] = [:]
+    /// 앨범 ID → 사진(최신순). "all" = 보관함, "unsorted" = 어느 앨범에도 없는 사진.
+    /// 보관함·사진 앱 앨범·동영상·즐겨찾기는 사진 앱에서 바로 읽는 목록, 자동 분류는 배열
+    var items: [String: AssetList] = [:]
     /// 사진 앱의 앨범·폴더 구조. "top" 또는 폴더 ID → 안에 든 것(사진 앱에서 정한 순서)
     var children: [String: [String]] = [:]
     /// 사진 앱의 앨범·폴더
@@ -37,11 +38,16 @@ struct Snapshot {
     var pending = 0
     var total = 0
     var loaded = false
-    /// 켤 때 먼저 보여 주는 임시 목록인지 (앨범 구조·표지만. 사진 목록은 비었거나 표지 한 장뿐이라
-    /// 비었다·없어졌다·몇 장이다를 여기서 판단하면 안 됨). 곧 전체 목록으로 바뀜
-    var partial = false
+    /// 켤 때 먼저 보여 주는 목록에서 아직 임시인 앨범 (자동 분류·미분류: 사진 목록이 비었거나 표지 한 장뿐).
+    /// 이 앨범들은 비었다·몇 장이다를 판단하면 안 됨. 전체 목록이 오면 비어 있음
+    var provisional: Set<String> = []
 
     static let top = "top"
+
+    /// 이 앨범의 사진 목록이 아직 임시인지 (처음 목록이 오기 전에는 모두)
+    func isProvisional(_ id: String) -> Bool {
+        !loaded || provisional.contains(id)
+    }
 
     var autoFolders: [Folder] { folders.filter { $0.isAuto } }
 
@@ -75,8 +81,21 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
     let classifier = Classifier()
 
     private let work = DispatchQueue(label: "gallery.library", qos: .userInitiated)
+    /// 날짜별 묶음 계산 (전체 목록 만들기를 기다리지 않게 따로)
+    private let sectionWork = DispatchQueue(label: "gallery.sections", qos: .userInitiated)
     private var rebuildScheduled = false
     private var started = false
+
+    /// 사진 앱에서 바로 읽는 목록 (보관함 "all", 사진 앱 앨범 "album:…", "videos", "favorites").
+    /// 다시 만들 때도 그대로 두고, 사진 보관함이 바뀌면 바뀐 것만 갈아 끼움 (work 줄에서만)
+    private struct HeldFetch {
+        var result: PHFetchResult<PHAsset>
+        var version: Int
+    }
+    private var heldFetches: [String: HeldFetch] = [:]
+    private var nextVersion = 1
+    /// 날짜별 묶음: 목록 ID → (version, 묶음) (메인 줄에서만)
+    private var sectionCache: [String: (version: Int, sections: DaySections)] = [:]
 
     /// 앨범에 넣은 사진을 자동 분류 앨범(카메라 등)에서 숨길지
     var hideMoved: Bool {
@@ -127,7 +146,113 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
     }
 
     func photoLibraryDidChange(_ changeInstance: PHChange) {
-        DispatchQueue.main.async { self.scheduleRebuild() }
+        work.async {
+            // 들고 있는 목록마다 바뀐 게 있으면 새 결과로. 사진이 들어오거나 빠지거나 옮겨졌을 때만 version 을 바꿈
+            // (즐겨찾기·편집처럼 내용만 바뀌면 version 은 그대로, 사진은 새 값)
+            var replaced: [String: AssetList] = [:]
+            for (key, held) in self.heldFetches {
+                guard let details = changeInstance.changeDetails(for: held.result) else { continue }
+                var updated = held
+                updated.result = details.fetchResultAfterChanges
+                let reordered = !details.hasIncrementalChanges
+                    || (details.insertedIndexes?.count ?? 0) > 0
+                    || (details.removedIndexes?.count ?? 0) > 0
+                    || details.hasMoves
+                if reordered {
+                    updated.version = self.nextVersion
+                    self.nextVersion += 1
+                }
+                self.heldFetches[key] = updated
+                replaced[key] = AssetList(fetch: updated.result, version: updated.version)
+            }
+            DispatchQueue.main.async {
+                // 사진 앱에서 바로 읽는 목록(보관함·앨범·동영상·즐겨찾기)은 전체 목록을 다시 만들기를 기다리지 않고 바로 바꿔 넣음
+                // (지우거나 옮긴 것이 곧바로 보이게). 자동 분류·미분류·표지·앨범 구성은 이어지는 다시 만들기가 맞춤
+                if !replaced.isEmpty, self.snapshot.loaded {
+                    var snap = self.snapshot
+                    var changed = false
+                    for (key, list) in replaced where snap.items[key] != nil {
+                        snap.items[key] = list
+                        changed = true
+                    }
+                    if changed {
+                        self.snapshot = snap
+                        NotificationCenter.default.post(name: Library.didChange, object: nil)
+                    }
+                }
+                self.scheduleRebuild()
+            }
+        }
+    }
+
+    /// 들고 있는 목록 (없으면 만들어 둠). work 줄에서만
+    private func heldList(_ key: String, _ make: () -> PHFetchResult<PHAsset>) -> (result: PHFetchResult<PHAsset>, list: AssetList) {
+        if let held = heldFetches[key] {
+            return (held.result, AssetList(fetch: held.result, version: held.version))
+        }
+        let result = make()
+        let version = nextVersion
+        nextVersion += 1
+        heldFetches[key] = HeldFetch(result: result, version: version)
+        return (result, AssetList(fetch: result, version: version))
+    }
+
+    private static var newestFirstOptions: PHFetchOptions {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        return options
+    }
+
+    /// 보관함·동영상·즐겨찾기 (사진 앱에서 바로. 지금까지 보관함 전체를 훑어 고르던 것과 같은 사진들)
+    private func systemLists() -> (all: (result: PHFetchResult<PHAsset>, list: AssetList), videos: AssetList, favorites: AssetList) {
+        let all = heldList("all") { PHAsset.fetchAssets(with: Library.newestFirstOptions) }
+        let videos = heldList("videos") { PHAsset.fetchAssets(with: .video, options: Library.newestFirstOptions) }
+        let favorites = heldList("favorites") {
+            let options = Library.newestFirstOptions
+            options.predicate = NSPredicate(format: "favorite == YES")
+            return PHAsset.fetchAssets(with: options)
+        }
+        return (all, videos.list, favorites.list)
+    }
+
+    /// 사진 앱 앨범 하나의 목록 (들고 있는 것을 씀)
+    private func albumList(_ id: String, _ album: PHAssetCollection) -> (result: PHFetchResult<PHAsset>, list: AssetList) {
+        heldList(id) { PHAsset.fetchAssets(in: album, options: Library.newestFirstOptions) }
+    }
+
+    /// 없어진 사진 앱 앨범의 목록은 버림
+    private func dropHeldAlbums(except ids: Set<String>) {
+        for key in Array(heldFetches.keys) where key.hasPrefix(Folder.albumPrefix) && !ids.contains(key) {
+            heldFetches[key] = nil
+        }
+    }
+
+    /// 앨범 하나의 목록을 화면 차례로 (newestFirst 가 아니면 오래된 순 — 같은 저장소를 뒤집어 봄). 없으면 빈 목록
+    func list(for folderID: String, newestFirst: Bool) -> AssetList {
+        let base = snapshot.items[folderID] ?? .empty
+        return newestFirst ? base : base.reversed()
+    }
+
+    /// 이미 계산해 둔 날짜별 묶음 (같은 목록·같은 version 일 때만)
+    func cachedDaySections(_ key: String, version: Int) -> DaySections? {
+        guard let cached = sectionCache[key], cached.version == version else { return nil }
+        return cached.sections
+    }
+
+    /// 날짜별 묶음을 뒤에서 계산해 메인 줄로 돌려줌 (목록 ID + version 마다 한 번)
+    func daySections(for list: AssetList, key: String, completion: @escaping (DaySections) -> Void) {
+        let version = list.version
+        if let cached = cachedDaySections(key, version: version) {
+            completion(cached)
+            return
+        }
+        sectionWork.async {
+            let sections = list.daySections()
+            DispatchQueue.main.async {
+                self.sectionCache[key] = (version, sections)
+                completion(sections)
+            }
+        }
     }
 
     func scheduleRebuild() {
@@ -183,31 +308,33 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         return (children, nodes, albumObjects)
     }
 
-    /// 켤 때 바로 보여 줄 임시 목록 (work 줄에서만): 사진 앱 앨범 구조와 표지, 그리고 지난번 전체 목록에서
-    /// 저장해 둔 자동 분류 앨범(이름·표지). 보관함 전체를 훑지 않아서 사진 수와 상관없이 빠름.
-    /// 사진 앱 앨범은 사진 목록이 아직 없고, 자동 분류 앨범은 표지 한 장만 들어 있음
+    /// 켤 때 바로 보여 줄 목록 (work 줄에서만): 사진 앱 앨범 구조·표지와 사진 앱에서 바로 읽는 목록(보관함·앨범·
+    /// 동영상·즐겨찾기 — 진짜 목록), 그리고 지난번 전체 목록에서 저장해 둔 자동 분류 앨범(이름·표지).
+    /// 보관함 전체를 훑지 않아서 사진 수와 상관없이 빠름. 자동 분류 앨범과 미분류는 임시 (provisional)
     private func quickBuild() -> Snapshot {
         let (children, nodes, albumObjects) = readStructure()
-        let newestOne = PHFetchOptions()
-        newestOne.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        newestOne.fetchLimit = 1
-
+        var items: [String: AssetList] = [:]
         var covers: [String: PHAsset] = [:]
         var userFolders: [Folder] = []
         for (id, album) in albumObjects {
-            // 사진 앱의 대표 사진. 없으면 가장 최근 사진 (전체 목록에서 표지로 쓰는 것과 같은 사진)
+            // 사진 앱의 대표 사진. 없으면 목록의 가장 최근 사진 (Snapshot.cover)
             let keyAssets: PHFetchResult<PHAsset>? = PHAsset.fetchKeyAssets(in: album, options: nil)
             if let key = keyAssets?.firstObject {
                 covers[id] = key
-            } else if let newest = PHAsset.fetchAssets(in: album, options: newestOne).firstObject {
-                covers[id] = newest
             }
+            // 사진 목록은 사진 앱에서 바로 읽는 것이라 만들어도 빠름 (장수도 처음부터 맞음)
+            items[id] = albumList(id, album).list
             if let node = nodes[id] { userFolders.append(node) }
         }
+        dropHeldAlbums(except: Set(albumObjects.map { $0.id }))
         userFolders.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
 
+        let system = systemLists()
+        items["all"] = system.all.list
+
         var folders: [Folder] = []
-        var items: [String: [PHAsset]] = [:]
+        // 미분류와 자동 분류 앨범은 전체 목록이 올 때까지 임시
+        var provisional: Set<String> = ["unsorted"]
         let summary = loadAutoSummary()
         let coverIDs = summary.compactMap { $0.cover }
         var found: [String: PHAsset] = [:]
@@ -218,18 +345,25 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         }
         for entry in summary {
             guard let section = Folder.Section(rawValue: entry.section), section != .user else { continue }
-            if let coverID = entry.cover {
+            if entry.id == "videos" || entry.id == "favorites" {
+                // 동영상·즐겨찾기는 사진 앱에서 바로 읽는 진짜 목록 (임시 아님)
+                let real = entry.id == "videos" ? system.videos : system.favorites
+                guard !real.isEmpty else { continue }
+                items[entry.id] = real
+            } else if let coverID = entry.cover {
                 // 표지 사진이 없어졌으면 그 앨범은 전체 목록이 올 때까지 뺌
                 guard let asset = found[coverID] else { continue }
-                items[entry.id] = [asset]
+                items[entry.id] = AssetList(array: [asset], version: 0)
+                provisional.insert(entry.id)
             } else {
-                items[entry.id] = []
+                items[entry.id] = .empty
+                provisional.insert(entry.id)
             }
             folders.append(Folder(id: entry.id, title: entry.title, symbol: entry.symbol, section: section))
         }
         folders.append(contentsOf: userFolders)
         return Snapshot(folders: folders, items: items, children: children, nodes: nodes, covers: covers,
-                        pending: 0, total: 0, loaded: true, partial: true)
+                        pending: 0, total: system.all.list.count, loaded: true, provisional: provisional)
     }
 
     // MARK: - 자동 분류 앨범 요약 (다음 실행 때 임시 목록에 씀. 앨범 ID·이름·기호·구역·표지 사진 ID 만)
@@ -269,15 +403,9 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
     }
 
     private func build(hideMoved: Bool) -> (Snapshot, [PHAsset]) {
-        let newestFirst = PHFetchOptions()
-        newestFirst.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-
-        let fetched = PHAsset.fetchAssets(with: newestFirst)
-        var all: [PHAsset] = []
-        all.reserveCapacity(fetched.count)
-        fetched.enumerateObjects { asset, _, _ in all.append(asset) }
-
-        var items: [String: [PHAsset]] = [:]
+        // 보관함·동영상·즐겨찾기·사진 앱 앨범은 들고 있는 목록 그대로 (사진 보관함이 안 바뀌었으면 같은 version)
+        let system = systemLists()
+        var items: [String: AssetList] = [:]
 
         // 사진 앱의 앨범·폴더 구조를 그대로 읽음 (사진 앱에서 묶어 둔 폴더가 그대로 폴더)
         let (children, nodes, albumObjects) = readStructure()
@@ -291,39 +419,36 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
             if let key = keyAssets?.firstObject {
                 covers[id] = key
             }
-            let inAlbum = PHAsset.fetchAssets(in: album, options: newestFirst)
-            var list: [PHAsset] = []
-            list.reserveCapacity(inAlbum.count)
-            inAlbum.enumerateObjects { asset, _, _ in
-                list.append(asset)
+            let inAlbum = albumList(id, album)
+            // 앨범에 든 사진은 자동 분류에서 뺄 수 있게 기억 (이 work 줄에서만 훑음)
+            inAlbum.result.enumerateObjects { asset, _, _ in
                 moved.insert(asset.localIdentifier)
             }
-            items[id] = list
+            items[id] = inAlbum.list
             if let node = nodes[id] { userFolders.append(node) }
         }
+        dropHeldAlbums(except: Set(albumObjects.map { $0.id }))
         userFolders.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
 
         var camera: [PHAsset] = [], screenshots: [PHAsset] = [], recordings: [PHAsset] = []
-        var saved: [PHAsset] = [], videos: [PHAsset] = [], favorites: [PHAsset] = [], unsorted: [PHAsset] = []
+        var saved: [PHAsset] = [], unsorted: [PHAsset] = []
         var apps: [String: [PHAsset]] = [:]
         var pending: [PHAsset] = []
         let cache = classifier.snapshotCache()
 
-        for asset in all {
-            if asset.mediaType == .video { videos.append(asset) }
-            if asset.isFavorite { favorites.append(asset) }
+        system.all.result.enumerateObjects { asset, _, _ in
             let inAlbum = moved.contains(asset.localIdentifier)
             if !inAlbum { unsorted.append(asset) }
             let hidden = hideMoved && inAlbum
             if asset.mediaSubtypes.contains(.photoScreenshot) {
                 if !hidden { screenshots.append(asset) }
-                continue
+                return
             }
             guard let entry = cache[asset.localIdentifier] else {
                 pending.append(asset)
-                continue
+                return
             }
-            if hidden { continue }
+            if hidden { return }
             switch entry.cat {
             case .camera:
                 camera.append(asset)
@@ -340,19 +465,21 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         }
 
         var folders: [Folder] = []
-        func add(_ id: String, _ title: String, _ symbol: String, _ list: [PHAsset], always: Bool = true) {
+        func add(_ id: String, _ title: String, _ symbol: String, _ list: AssetList, always: Bool = true) {
             guard always || !list.isEmpty else { return }
             folders.append(Folder(id: id, title: title, symbol: symbol, section: .auto))
             items[id] = list
         }
-        add("camera", "카메라", "camera", camera)
-        add("screenshots", "스크린샷", "camera.viewfinder", screenshots)
-        add("saved", "저장한 사진", "square.and.arrow.down", saved)
-        add("recordings", "화면 녹화", "record.circle", recordings, always: false)
-        add("videos", "동영상", "video", videos, always: false)
-        add("favorites", "즐겨찾기", "heart", favorites, always: false)
-        items["all"] = all             // 보관함 탭
-        items["unsorted"] = unsorted   // 미분류 탭
+        // 자동 분류는 배열 목록 (차례·version 을 여기서 같이 만듦)
+        add("camera", "카메라", "camera", AssetList.make(camera))
+        add("screenshots", "스크린샷", "camera.viewfinder", AssetList.make(screenshots))
+        add("saved", "저장한 사진", "square.and.arrow.down", AssetList.make(saved))
+        add("recordings", "화면 녹화", "record.circle", AssetList.make(recordings), always: false)
+        // 동영상·즐겨찾기는 사진 앱에서 바로 (예전처럼 앨범에 넣었는지와 상관없이 전부)
+        add("videos", "동영상", "video", system.videos, always: false)
+        add("favorites", "즐겨찾기", "heart", system.favorites, always: false)
+        items["all"] = system.all.list                // 보관함 탭
+        items["unsorted"] = AssetList.make(unsorted)  // 미분류 탭
 
         let appOrder = apps.sorted { a, b in
             a.value.count != b.value.count ? a.value.count > b.value.count : a.key < b.key
@@ -360,12 +487,12 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         for (name, list) in appOrder {
             let folder = Folder(id: "app:" + name, title: name, symbol: "app", section: .apps)
             folders.append(folder)
-            items[folder.id] = list
+            items[folder.id] = AssetList.make(list)
         }
         folders.append(contentsOf: userFolders)
 
         let snap = Snapshot(folders: folders, items: items, children: children, nodes: nodes, covers: covers,
-                            pending: pending.count, total: all.count, loaded: true)
+                            pending: pending.count, total: system.all.result.count, loaded: true)
         return (snap, pending)
     }
 

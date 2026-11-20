@@ -661,8 +661,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         if folder.isGroup {
             return String(snapshot.children[folder.id]?.count ?? 0)
         }
-        // 켤 때의 임시 목록에는 사진 목록이 없어서 장수는 전체 목록이 온 뒤에 (틀린 숫자를 보이지 않게)
-        if snapshot.partial { return "" }
+        // 켤 때의 임시 목록(자동 분류)은 장수를 모름: 전체 목록이 온 뒤에 (틀린 숫자를 보이지 않게)
+        if snapshot.isProvisional(folder.id) { return "" }
         return String(snapshot.items[folder.id]?.count ?? 0)
     }
 
@@ -685,8 +685,7 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
 
         if case .folder(let id) = mode, snapshot.loaded {
             guard let node = snapshot.nodes[id] else {
-                // 폴더가 없어짐 (켤 때의 임시 목록으로는 판단하지 않음)
-                if snapshot.partial { return }
+                // 폴더가 없어짐 (켤 때의 목록도 사진 앱 구조는 진짜라 그대로 판단)
                 if navigationController?.topViewController === self {
                     navigationController?.popViewController(animated: true)
                 }

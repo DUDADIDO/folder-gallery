@@ -569,9 +569,11 @@ final class PhotoGridLayout: UICollectionViewLayout {
 final class GridViewController: UIViewController, UICollectionViewDataSource, UICollectionViewDelegate,
                                 UICollectionViewDataSourcePrefetching, UIGestureRecognizerDelegate {
     private let folder: Folder
-    private var assets: [PHAsset] = []
-    private var assetIDs: [String] = []
-    private var sections: [(day: Date, range: Range<Int>)] = []
+    /// 보여 주는 사진 목록 (화면 차례). 같은 목록인지는 list.version 으로 앎 (사진을 하나하나 비교하지 않음)
+    private var list: AssetList = .empty
+    private var sections: DaySections = []
+    /// 처음에 바로 날짜로 나누는 사진 수. 그 뒤는 한 묶음으로 두고, 전체는 뒤에서 계산해 바꿔 넣음
+    private static let exactSectionLimit = 3000
     private var collectionView: UICollectionView!
     private let gridLayout = PhotoGridLayout()
     private let emptyLabel = UILabel()
@@ -679,8 +681,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         gridLayout.headerHeight = isRoot ? 42 : nil
         gridLayout.columns = columns
         gridLayout.aspect = { [weak self] flat in
-            guard let self, flat >= 0, flat < self.assets.count else { return 1 }
-            let asset = self.assets[flat]
+            guard let self, flat >= 0, flat < self.list.count else { return 1 }
+            let asset = self.list[flat]
             guard asset.pixelWidth > 0, asset.pixelHeight > 0 else { return 1 }
             return CGFloat(asset.pixelWidth) / CGFloat(asset.pixelHeight)
         }
@@ -1223,29 +1225,26 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func reloadFromLibrary(force: Bool) {
         finishPinchNow()
         let snapshot = Library.shared.snapshot
-        // 임시 목록(켤 때 먼저 보여 주는 것)으로는 지워졌는지 판단하지 않음
-        let isFinal = snapshot.loaded && !snapshot.partial
-        if isFinal && !snapshot.folders.contains(where: { $0.id == folder.id }) && folder.isUser {
+        if snapshot.loaded && !snapshot.folders.contains(where: { $0.id == folder.id }) && folder.isUser {
             // 폴더가 지워짐
             if navigationController?.topViewController === self {
                 navigationController?.popViewController(animated: true)
             }
             return
         }
-        // 임시 목록에는 사진 목록이 없거나 표지 한 장뿐이라 전체 목록이 올 때까지 비워 둠
-        var new = snapshot.partial ? [] : (snapshot.items[folder.id] ?? [])
-        // 앨범 안은 순정처럼 오래된 항목 순이 기본
-        if !newestFirst { new.reverse() }
-        let newIDs = new.map(\.localIdentifier)
-        if !force && newIDs == assetIDs {
-            assets = new   // 순서는 같아도 즐겨찾기·편집 상태가 바뀐 새 값으로
+        // 임시 목록(켤 때 먼저 보여 주는 자동 분류·미분류)은 사진 목록이 없거나 표지 한 장뿐이라 전체 목록이 올 때까지 비워 둠
+        let provisional = snapshot.isProvisional(folder.id)
+        // 앨범 안은 순정처럼 오래된 항목 순이 기본 (같은 저장소를 뒤집어 봄)
+        let new = provisional ? AssetList.empty : Library.shared.list(for: folder.id, newestFirst: newestFirst)
+        if !force && new.version == list.version {
+            list = new   // 들어 있는 사진·순서는 같고, 즐겨찾기·편집 상태가 바뀐 새 값으로
             refreshHero()   // 이름·표지가 바뀌었을 수 있음
             return
         }
 
-        let keep = Set(selectedAssets().map(\.localIdentifier))
-        assets = new
-        assetIDs = newIDs
+        // 고른 사진은 ID 로 기억했다가 새 목록에서 찾아 다시 고름 (목록 전체를 훑지 않음)
+        let keep = selectedAssets().map(\.localIdentifier)
+        list = new
         buildSections()
         gridLayout.setSections(sections.map { $0.range.count })
         collectionView.reloadData()
@@ -1254,45 +1253,73 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             collectionView.backgroundView = emptyLabel
         } else {
             emptyLabel.text = "사진이 없어요"
-            collectionView.backgroundView = (assets.isEmpty && isFinal) ? emptyLabel : nil
+            collectionView.backgroundView = (list.isEmpty && !provisional) ? emptyLabel : nil
         }
 
         if selecting && !keep.isEmpty {
-            for (s, section) in sections.enumerated() {
-                for (offset, index) in section.range.enumerated() where keep.contains(assetIDs[index]) {
-                    collectionView.selectItem(at: IndexPath(item: offset, section: s), animated: false, scrollPosition: [])
-                }
+            for flat in list.indexes(ofIDs: keep) {
+                guard let path = indexPath(forFlat: flat) else { continue }
+                collectionView.selectItem(at: path, animated: false, scrollPosition: [])
             }
         }
         updateChrome()
     }
 
+    /// 날짜별 묶음. 앨범 안은 한 덩어리. 보관함·미분류는 앞의 몇천 장만 바로 날짜로 나누고(메인 줄에서 전부 읽지 않게)
+    /// 나머지는 한 묶음으로 둔 뒤, 전체 묶음을 Library 가 뒤에서 계산해 오면 바꿔 넣음
     private func buildSections() {
         if !isRoot {
             // 앨범 안: 날짜로 나누지 않고 한 덩어리
-            sections = assets.isEmpty ? [] : [(day: Date(), range: 0..<assets.count)]
+            sections = list.isEmpty ? [] : [(day: Date(), range: 0..<list.count)]
             return
         }
-        let calendar = Calendar.current
-        var result: [(day: Date, range: Range<Int>)] = []
-        var start = 0
-        var current: Date?
-        var dayEnd = Date.distantPast   // current 날의 끝. 최신순이라 같은 날이 이어서 나옴
-        for (index, asset) in assets.enumerated() {
-            let date = asset.creationDate ?? .distantPast
-            var day = current ?? .distantFuture
-            if current == nil || date < day || date >= dayEnd {
-                day = calendar.startOfDay(for: date)
-                dayEnd = calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86400)
+        if let cached = Library.shared.cachedDaySections(folder.id, version: list.version) {
+            sections = cached
+            return
+        }
+        let limit = GridViewController.exactSectionLimit
+        sections = list.daySections(limit: limit)
+        guard list.count > limit else { return }
+        let version = list.version
+        Library.shared.daySections(for: list, key: folder.id) { [weak self] full in
+            self?.applyFullSections(full, version: version)
+        }
+    }
+
+    /// 뒤에서 계산한 전체 날짜별 묶음으로 바꿈. 앞부분은 같아서 보통 아무것도 안 움직이고,
+    /// 이미 뒷부분까지 내려가 있으면 화면 맨 위의 사진을 제자리에 둠
+    private func applyFullSections(_ full: DaySections, version: Int) {
+        guard isViewLoaded, collectionView != nil, isRoot, list.version == version else { return }
+        if transitioning || isPinching {
+            // 화면 전환·칸 수 바꾸기가 끝난 뒤에
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.applyFullSections(full, version: version)
             }
-            if day != current {
-                if let current { result.append((current, start..<index)) }
-                current = day
-                start = index
+            return
+        }
+        let selectedFlats = (collectionView.indexPathsForSelectedItems ?? []).map { flatIndex($0) }
+        var anchor: (flat: Int, offset: CGFloat)?
+        if let top = collectionView.indexPathsForVisibleItems.min(),
+           let frame = gridLayout.layoutAttributesForItem(at: top)?.frame {
+            anchor = (flatIndex(top), frame.minY - collectionView.contentOffset.y)
+        }
+        sections = full
+        gridLayout.setSections(sections.map { $0.range.count })
+        collectionView.reloadData()
+        collectionView.layoutIfNeeded()
+        if let anchor, let path = indexPath(forFlat: anchor.flat),
+           let frame = gridLayout.layoutAttributesForItem(at: path)?.frame {
+            let y = frame.minY - anchor.offset
+            if abs(y - collectionView.contentOffset.y) > 0.5 {
+                collectionView.contentOffset = CGPoint(x: collectionView.contentOffset.x, y: y)
             }
         }
-        if let current { result.append((current, start..<assets.count)) }
-        sections = result
+        for flat in selectedFlats {
+            if let path = indexPath(forFlat: flat) {
+                collectionView.selectItem(at: path, animated: false, scrollPosition: [])
+            }
+        }
+        if selecting { updateChrome() }
     }
 
     /// 앨범 화면은 최신순인지 (보관함·미분류 탭은 늘 최신순)
@@ -1311,11 +1338,23 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         return CGRect(x: 0, y: 0, width: size.width, height: side)
     }
 
-    /// 그 사진의 칸 자리 (없으면 nil)
-    private func indexPath(forAssetID id: String) -> IndexPath? {
-        guard let flat = assetIDs.firstIndex(of: id),
-              let section = sections.firstIndex(where: { $0.range.contains(flat) }) else { return nil }
-        return IndexPath(item: flat - sections[section].range.lowerBound, section: section)
+    /// 목록 안의 차례 → 칸 자리 (묶음을 반으로 나눠 찾음)
+    private func indexPath(forFlat flat: Int) -> IndexPath? {
+        guard flat >= 0, flat < list.count, !sections.isEmpty else { return nil }
+        var low = 0, high = sections.count - 1
+        while low < high {
+            let mid = (low + high + 1) / 2
+            if sections[mid].range.lowerBound <= flat { low = mid } else { high = mid - 1 }
+        }
+        let range = sections[low].range
+        guard range.contains(flat) else { return nil }
+        return IndexPath(item: flat - range.lowerBound, section: low)
+    }
+
+    /// 그 사진의 칸 자리 (없으면 nil). near 는 그 사진이 있을 만한 차례 (보기 화면의 지금 차례)
+    private func indexPath(forAssetID id: String, near hint: Int? = nil) -> IndexPath? {
+        guard let flat = list.index(ofID: id, near: hint) else { return nil }
+        return indexPath(forFlat: flat)
     }
 
     /// 사진 전환이 시작하고 돌아올 자리 (그 사진 칸의 그림 판). 화면 밖이면 nil
@@ -1324,10 +1363,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         return (collectionView.cellForItem(at: path) as? AssetCell)?.zoomSourceView
     }
 
-    /// 사진 전환(PhotoTransitionAnimator)이 쓸 칸의 그림 판과 그 썸네일.
+    /// 사진 전환(PhotoTransitionAnimator)이 쓸 칸의 그림 판과 그 썸네일. near 는 보기 화면의 지금 차례 (찾기 빠르게).
     /// reveal 이면(닫힐 때) 그 칸이 화면 밖이거나 막대에 가려 있으면 먼저 그 칸이 가운데 오게 스크롤함 (순정처럼)
-    func transitionSource(forAssetID id: String, reveal: Bool) -> (view: UIView, image: UIImage?)? {
-        guard isViewLoaded, collectionView != nil, let path = indexPath(forAssetID: id) else { return nil }
+    func transitionSource(forAssetID id: String, near hint: Int? = nil, reveal: Bool) -> (view: UIView, image: UIImage?)? {
+        guard isViewLoaded, collectionView != nil, let path = indexPath(forAssetID: id, near: hint) else { return nil }
         if reveal, let frame = gridLayout.layoutAttributesForItem(at: path)?.frame {
             collectionView.layoutIfNeeded()
             let visible = view.bounds.inset(by: view.safeAreaInsets)
@@ -1345,10 +1384,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     func reveal(assetID id: String) {
         loadViewIfNeeded()
         if selecting { setSelecting(false) }
-        if !assetIDs.contains(id) { reloadFromLibrary(force: false) }
-        guard let flat = assetIDs.firstIndex(of: id),
-              let section = sections.firstIndex(where: { $0.range.contains(flat) }) else { return }
-        let path = IndexPath(item: flat - sections[section].range.lowerBound, section: section)
+        if list.index(ofID: id) == nil { reloadFromLibrary(force: false) }
+        guard let path = indexPath(forAssetID: id) else { return }
         view.layoutIfNeeded()
         collectionView.layoutIfNeeded()
         collectionView.scrollToItem(at: path, at: .centeredVertically, animated: false)
@@ -1359,7 +1396,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     private func assetAt(_ indexPath: IndexPath) -> PHAsset {
-        assets[flatIndex(indexPath)]
+        list[flatIndex(indexPath)]
     }
 
     private func selectedAssets() -> [PHAsset] {
@@ -1454,9 +1491,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func configureHero(_ hero: HeroHeaderView) {
         let snapshot = Library.shared.snapshot
         hero.titleLabel.text = snapshot.nodes[folder.id]?.title ?? folder.title
-        hero.countLabel.text = "\(assets.count)개의 항목"
+        hero.countLabel.text = "\(list.count)개의 항목"
         // 사진 앱 앨범은 그 앨범의 대표 사진, 아니면 가장 최근 사진 (앨범 카드와 같은 사진)
-        guard let cover = snapshot.cover(folder.id) ?? assets.last else { return }
+        guard let cover = snapshot.cover(folder.id) ?? list.last else { return }
         let id = cover.localIdentifier
         guard hero.assetID != id else { return }
         if hero.requestID != PHInvalidImageRequestID {
@@ -1517,7 +1554,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             collectionView.deselectItem(at: indexPath, animated: false)
             // 칸 수를 바꾸는 중에는 열지 않음
             guard !isPinching else { return }
-            let viewer = ViewerViewController(assets: assets, index: flatIndex(indexPath), sourceAlbumID: folder.albumID)
+            let viewer = ViewerViewController(list: list, index: flatIndex(indexPath), folderID: folder.id,
+                                              newestFirst: newestFirst, sourceAlbumID: folder.albumID)
             viewer.fallbackBounds = view.bounds
             // 열고 닫는 전환은 내비게이션 delegate(PhotoNavigationDelegate)의 우리 전환:
             // 사진만 이 칸에서 화면에 맞춘 자리로 커지고, 둘레(바탕·줄)는 제자리에서 서서히 (막대는 시스템이 숨기고 보임).
@@ -1600,11 +1638,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 미분류 사진을 한 장씩 넘기며 정리. 모든 사진을 보게 되니 Face ID 로 확인
     @objc private func startSorter() {
-        let list = assets
-        guard !list.isEmpty else { return }
+        let current = list
+        guard !current.isEmpty else { return }
         Auth.verify(reason: "사진 정리를 시작하려면 인증이 필요해요") { [weak self] ok in
             guard ok, let self else { return }
-            self.navigationController?.pushViewController(SorterViewController(assets: list), animated: true)
+            self.navigationController?.pushViewController(SorterViewController(assets: current.array()), animated: true)
         }
     }
 
@@ -1618,7 +1656,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     @objc private func toggleAll() {
         let selected = collectionView.indexPathsForSelectedItems?.count ?? 0
-        if selected == assets.count {
+        if selected == list.count {
             for path in collectionView.indexPathsForSelectedItems ?? [] {
                 collectionView.deselectItem(at: path, animated: false)
             }
@@ -1667,7 +1705,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             navigationItem.title = count == 0 ? "항목 선택" : "\(count)장 선택"
             navigationItem.hidesBackButton = true
             navigationItem.leftBarButtonItem = UIBarButtonItem(title: "취소", style: .plain, target: self, action: #selector(cancelSelecting))
-            let allSelected = count == assets.count && count > 0
+            let allSelected = count == list.count && count > 0
             navigationItem.rightBarButtonItem = UIBarButtonItem(title: allSelected ? "전체 해제" : "전체 선택", style: .plain,
                                                                 target: self, action: #selector(toggleAll))
             for item in [shareItem, moreItem, deleteItem] {
@@ -1679,13 +1717,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             navigationItem.hidesBackButton = false
             if folder.id == "unsorted" {
                 let sort = UIBarButtonItem(title: "정리하기", style: .plain, target: self, action: #selector(startSorter))
-                sort.isEnabled = !assets.isEmpty
+                sort.isEnabled = !list.isEmpty
                 navigationItem.leftBarButtonItem = sort
             } else {
                 navigationItem.leftBarButtonItem = nil
             }
             let select = UIBarButtonItem(title: "선택", style: .plain, target: self, action: #selector(startSelecting))
-            select.isEnabled = !assets.isEmpty
+            select.isEnabled = !list.isEmpty
             if isRoot {
                 navigationItem.rightBarButtonItem = select
             } else {

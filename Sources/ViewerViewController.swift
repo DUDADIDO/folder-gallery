@@ -698,12 +698,21 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
         }
     }
 
-    var assets: [PHAsset] = [] {
-        didSet {
-            layout.count = assets.count
+    /// 줄에 보여 주는 목록. 새로 넣으면 다시 그림
+    var list: AssetList {
+        get { storage }
+        set {
+            storage = newValue
+            layout.count = newValue.count
             collectionView.reloadData()
             applyFocus(focus)
         }
+    }
+    private var storage: AssetList = .empty
+
+    /// 같은 사진·같은 차례의 새 목록 (즐겨찾기 등 내용만 바뀜). 다시 그리지 않음
+    func replaceList(_ fresh: AssetList) {
+        storage = fresh
     }
     /// 사용자가 줄을 밀거나 눌러서 고른 사진
     var onPick: ((Int) -> Void)?
@@ -721,8 +730,8 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: stripLayout)
         super.init(frame: frame)
         stripLayout.aspect = { [weak self] index in
-            guard let self, index >= 0, index < self.assets.count else { return 1 }
-            let asset = self.assets[index]
+            guard let self, index >= 0, index < self.storage.count else { return 1 }
+            let asset = self.storage[index]
             guard asset.pixelWidth > 0, asset.pixelHeight > 0 else { return 1 }
             return CGFloat(asset.pixelWidth) / CGFloat(asset.pixelHeight)
         }
@@ -754,8 +763,8 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
     }
 
     private func applyFocus(_ value: CGFloat) {
-        guard !assets.isEmpty else { return }
-        focus = min(max(0, value), CGFloat(assets.count - 1))
+        guard !storage.isEmpty else { return }
+        focus = min(max(0, value), CGFloat(storage.count - 1))
         layout.focus = focus
         layout.invalidateLayout()
         guard bounds.width > 0 else { return }
@@ -764,7 +773,7 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
 
     /// 넘기는 동안은 소수(예: 3.4)로 불러서 넓어지는 칸이 따라오게
     func setFocus(_ value: CGFloat, animated: Bool) {
-        guard !isUserDriving, !assets.isEmpty else { return }
+        guard !isUserDriving, !storage.isEmpty else { return }
         lastPicked = Int(value.rounded())
         if abs(value - focus) < 0.0001 && collectionView.contentOffset.x == layout.anchor(for: focus) - bounds.width / 2 {
             return
@@ -782,12 +791,12 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
     func numberOfSections(in collectionView: UICollectionView) -> Int { 1 }
 
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        assets.count
+        storage.count
     }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "thumb", for: indexPath) as! ThumbCell
-        let asset = assets[indexPath.item]
+        let asset = storage[indexPath.item]
         let id = asset.localIdentifier
         cell.assetID = id
         cell.requestID = Thumbs.manager.requestImage(for: asset, targetSize: CGSize(width: 120, height: 120), contentMode: .aspectFill,
@@ -808,7 +817,7 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
 
     private func focusValue(forOffset x: CGFloat) -> CGFloat {
         let raw = (x + bounds.width / 2 - layout.lead) / layout.step
-        return min(max(0, raw), CGFloat(max(0, assets.count - 1)))
+        return min(max(0, raw), CGFloat(max(0, storage.count - 1)))
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
@@ -816,7 +825,7 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard isUserDriving, !assets.isEmpty, bounds.width > 0 else { return }
+        guard isUserDriving, !storage.isEmpty, bounds.width > 0 else { return }
         let value = focusValue(forOffset: scrollView.contentOffset.x)
         focus = value
         layout.focus = value
@@ -831,7 +840,7 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
     /// 손을 떼면 칸 위에 정확히 멈추게
     func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint,
                                    targetContentOffset: UnsafeMutablePointer<CGPoint>) {
-        guard !assets.isEmpty, bounds.width > 0 else { return }
+        guard !storage.isEmpty, bounds.width > 0 else { return }
         let index = focusValue(forOffset: targetContentOffset.pointee.x).rounded()
         targetContentOffset.pointee.x = layout.anchor(for: index) - bounds.width / 2
     }
@@ -956,9 +965,19 @@ final class VideoControlsView: UIView {
 /// 좌우로 넘겨 보는 화면. 순정 사진 앱처럼 위에 장소(또는 날짜)·시간, 아래에 썸네일 줄과 막대.
 /// 아래로 끌면 사진이 손가락을 따라가다 격자의 썸네일로 닫히고(PhotoTransitionAnimator), 위로 끌면 사진이 위쪽을 꽉 채우며 아래에 정보가 이어짐
 final class ViewerViewController: UIPageViewController, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
-    private var assets: [PHAsset]
-    private var indexByID: [String: Int]
+    /// 보여 주는 목록 (격자와 같은 앨범·같은 차례). 보관함이 바뀌면 Library 에서 다시 읽음
+    private var list: AssetList
+    private let folderID: String
+    private let newestFirst: Bool
+    /// 지금 사진과 그 목록 안의 차례
     private var currentID: String
+    private var currentIndex: Int
+    /// 지웠거나 앨범에서 뺐는데 아직 목록에 남아 있는 사진 (보관함 알림이 오기 전). 넘길 때 건너뜀
+    private var removedIDs = Set<String>()
+    /// 즐겨찾기·날짜 조정 뒤 새로 받은 사진 (새 목록이 올 때까지 이것을 씀)
+    private var freshAssets: [String: PHAsset] = [:]
+    /// 화면 전환 중에 보관함이 바뀌었으면 끝난 뒤에 반영
+    private var libraryChangePending = false
     private let sourceAlbumID: String?
     private var chromeHidden = false
     private let panGate = VerticalPanGate()
@@ -1000,10 +1019,14 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     /// (끌어 닫는 동안 손가락을 따라 옅어지게 하려고) 이 화면에서는 쓰지 않음
     private let bottomBar = UIToolbar()
 
-    init(assets: [PHAsset], index: Int, sourceAlbumID: String?) {
-        self.assets = assets
-        self.indexByID = ViewerViewController.indexMap(assets)
-        self.currentID = assets.indices.contains(index) ? assets[index].localIdentifier : (assets.first?.localIdentifier ?? "")
+    /// list 는 격자가 보여 주는 목록, folderID·newestFirst 는 보관함이 바뀌었을 때 같은 목록을 다시 읽는 데 씀
+    init(list: AssetList, index: Int, folderID: String, newestFirst: Bool, sourceAlbumID: String?) {
+        self.list = list
+        self.folderID = folderID
+        self.newestFirst = newestFirst
+        let start = list.isEmpty ? 0 : min(max(0, index), list.count - 1)
+        self.currentIndex = start
+        self.currentID = list.isEmpty ? "" : list[start].localIdentifier
         self.sourceAlbumID = sourceAlbumID
         super.init(transitionStyle: .scroll, navigationOrientation: .horizontal, options: [.interPageSpacing: 16])
         // 아래 탭 막대는 iOS 18 부터 setTabBarHidden 으로 직접 숨기고 보임 (viewWillAppear·viewWillDisappear).
@@ -1021,15 +1044,6 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         if let timeObserver, let observedPlayer {
             observedPlayer.removeTimeObserver(timeObserver)
         }
-    }
-
-    private static func indexMap(_ assets: [PHAsset]) -> [String: Int] {
-        var map: [String: Int] = [:]
-        map.reserveCapacity(assets.count)
-        for (index, asset) in assets.enumerated() {
-            map[asset.localIdentifier] = index
-        }
-        return map
     }
 
     override var prefersStatusBarHidden: Bool { infoShown }
@@ -1054,11 +1068,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeMoreMenu())
         setUpTitle()
 
-        if let index = currentIndex {
-            setViewControllers([makePage(index)], direction: .forward, animated: false)
+        if !list.isEmpty {
+            setViewControllers([makePage(currentIndex)], direction: .forward, animated: false)
         }
 
-        scrubber.assets = assets
+        scrubber.list = list
         scrubber.onPick = { [weak self] index in self?.jump(to: index) }
         scrubber.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scrubber)
@@ -1114,6 +1128,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
         observePaging()
         pageDidChange(animated: false)
+        NotificationCenter.default.addObserver(self, selector: #selector(libraryChanged), name: Library.didChange, object: nil)
     }
 
     /// 좌우로 넘기는 동안 썸네일 줄의 넓어진 칸이 손가락을 따라오게
@@ -1136,7 +1151,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         var best: (distance: CGFloat, focus: CGFloat)?
         for child in children {
             guard let page = child as? AssetPageViewController, page.isViewLoaded, page.view.window != nil,
-                  let index = indexByID[page.asset.localIdentifier] else { continue }
+                  let index = index(of: page) else { continue }
             let frame = page.view.convert(page.view.bounds, to: view)
             let distance = (frame.midX - view.bounds.midX) / (width + 16)
             if best == nil || abs(distance) < abs(best?.distance ?? 0) {
@@ -1232,7 +1247,12 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         if !infoShown { currentPage?.setDismissDrag(.identity) }
         backdrop.alpha = 1
         applyChromeAlpha()
-        if let index = currentIndex { scrubber.setFocus(CGFloat(index), animated: false) }
+        if !list.isEmpty { scrubber.setFocus(CGFloat(currentIndex), animated: false) }
+        // 전환 중에 보관함이 바뀌었으면 이제 반영
+        if libraryChangePending {
+            libraryChangePending = false
+            libraryChanged()
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -1297,12 +1317,20 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         }
     }
 
-    private var currentIndex: Int? {
-        indexByID[currentID]
+    /// 목록의 index 번째 사진 (즐겨찾기·날짜 조정으로 새로 받은 것이 있으면 그것)
+    private func asset(at index: Int) -> PHAsset {
+        let asset = list[index]
+        return freshAssets[asset.localIdentifier] ?? asset
     }
 
     private var currentAsset: PHAsset? {
-        currentIndex.map { assets[$0] }
+        guard currentIndex >= 0, currentIndex < list.count else { return nil }
+        return asset(at: currentIndex)
+    }
+
+    /// 사진 화면의 목록 안 차례 (지금 차례 둘레부터 찾음)
+    private func index(of page: AssetPageViewController) -> Int? {
+        list.index(ofID: page.asset.localIdentifier, near: currentIndex)
     }
 
     private var currentPage: AssetPageViewController? {
@@ -1311,6 +1339,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     /// 지금 보고 있는 사진 (확대 전환이 돌아갈 칸을 찾는 데 씀)
     var visibleAssetID: String { currentID }
+    /// 그 사진의 목록 안 차례 (격자에서 그 칸을 빨리 찾게)
+    var visibleAssetIndex: Int? { list.isEmpty ? nil : currentIndex }
 
     /// '끌어내려 닫기'를 시작해도 되는지. location·velocity 는 끌기의 위치(이 화면 좌표)와 속도.
     /// 분명히 아래로 끌 때만 — 옆으로 넘기기(빠르게 연달아 넘기는 것 포함)는 절대 닫기가 아님
@@ -1375,7 +1405,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     }
 
     private func makePage(_ index: Int) -> AssetPageViewController {
-        let asset = assets[index]
+        let asset = self.asset(at: index)
         let page = AssetPageViewController(asset: asset, liveEnabled: !Prefs.liveOffAssets.contains(asset.localIdentifier))
         page.onSingleTap = { [weak self] in self?.tapped() }
         page.onInfoPullDown = { [weak self] in self?.setInfo(false, animated: true) }
@@ -1391,7 +1421,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         updateTitle()
         updateLiveBadge()
         attachVideoControls()
-        if let index = currentIndex { scrubber.setFocus(CGFloat(index), animated: animated) }
+        if !list.isEmpty { scrubber.setFocus(CGFloat(currentIndex), animated: animated) }
         applyChromeAlpha()
     }
 
@@ -1565,9 +1595,10 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     /// 썸네일 줄에서 고른 사진으로 바로 바꿈
     private func jump(to index: Int) {
-        guard index >= 0, index < assets.count, assets[index].localIdentifier != currentID else { return }
+        guard index >= 0, index < list.count, list[index].localIdentifier != currentID else { return }
         if infoShown { setInfo(false, animated: false) }
-        currentID = assets[index].localIdentifier
+        currentID = list[index].localIdentifier
+        currentIndex = index
         setViewControllers([makePage(index)], direction: .forward, animated: false)
         pageDidChange(animated: false)
     }
@@ -1739,16 +1770,19 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     func pageViewController(_ pageViewController: UIPageViewController,
                             viewControllerBefore viewController: UIViewController) -> UIViewController? {
-        guard let page = viewController as? AssetPageViewController,
-              let index = indexByID[page.asset.localIdentifier], index > 0 else { return nil }
-        return makePage(index - 1)
+        guard let page = viewController as? AssetPageViewController, let index = index(of: page) else { return nil }
+        // 지웠는데 아직 목록에 남은 사진은 건너뜀
+        var before = index - 1
+        while before >= 0, removedIDs.contains(list[before].localIdentifier) { before -= 1 }
+        return before >= 0 ? makePage(before) : nil
     }
 
     func pageViewController(_ pageViewController: UIPageViewController,
                             viewControllerAfter viewController: UIViewController) -> UIViewController? {
-        guard let page = viewController as? AssetPageViewController,
-              let index = indexByID[page.asset.localIdentifier], index + 1 < assets.count else { return nil }
-        return makePage(index + 1)
+        guard let page = viewController as? AssetPageViewController, let index = index(of: page) else { return nil }
+        var after = index + 1
+        while after < list.count, removedIDs.contains(list[after].localIdentifier) { after += 1 }
+        return after < list.count ? makePage(after) : nil
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
@@ -1758,28 +1792,96 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             (old as? AssetPageViewController)?.resetTransientState()
         }
         guard completed, let page = currentPage else { return }
+        if let index = index(of: page) { currentIndex = index }
         currentID = page.asset.localIdentifier
         pageDidChange(animated: true)
     }
 
-    /// 사진이 목록에서 빠졌을 때 (지움·옮김). 그사이 다른 사진으로 넘겼으면 보던 사진은 그대로
+    /// 사진이 목록에서 빠졌을 때 (지움·옮김). 보관함 알림을 기다리지 않고 바로 옆 사진으로 넘어감
+    /// (썸네일 줄은 새 목록이 올 때까지 잠깐 그대로). 그사이 다른 사진으로 넘겼으면 보던 사진은 그대로
     private func remove(id: String) {
-        guard let index = indexByID[id] else { return }
-        let wasCurrent = id == currentID
-        assets.remove(at: index)
-        indexByID = ViewerViewController.indexMap(assets)
-        if wasCurrent {
-            if infoShown { setInfo(false, animated: false) }
-            if assets.isEmpty {
-                navigationController?.popViewController(animated: true)
-                return
-            }
-            let next = min(index, assets.count - 1)
-            currentID = assets[next].localIdentifier
-            setViewControllers([makePage(next)], direction: .forward, animated: false)
+        // 새 목록이 이미 와서 그 사진이 없으면 할 일 없음
+        guard list.index(ofID: id, near: currentIndex) != nil else { return }
+        removedIDs.insert(id)
+        guard id == currentID else { return }
+        if infoShown { setInfo(false, animated: false) }
+        guard let next = neighbour(of: currentIndex) else {
+            closeEmpty()
+            return
         }
-        scrubber.assets = assets
+        show(next)
+    }
+
+    /// index 다음(없으면 앞)의 아직 남아 있는 사진
+    private func neighbour(of index: Int) -> Int? {
+        var after = index + 1
+        while after < list.count, removedIDs.contains(list[after].localIdentifier) { after += 1 }
+        if after < list.count { return after }
+        var before = min(index, list.count) - 1
+        while before >= 0, removedIDs.contains(list[before].localIdentifier) { before -= 1 }
+        return before >= 0 ? before : nil
+    }
+
+    /// index 번째 사진으로 바로 바꿈
+    private func show(_ index: Int) {
+        currentIndex = index
+        currentID = list[index].localIdentifier
+        setViewControllers([makePage(index)], direction: .forward, animated: false)
         pageDidChange(animated: false)
+    }
+
+    /// 보여 줄 사진이 없음: 닫음 (이 위에 다른 화면이 열려 있으면 이 화면만 빼냄)
+    private func closeEmpty() {
+        guard let navigation = navigationController else { return }
+        if navigation.topViewController === self {
+            navigation.popViewController(animated: true)
+        } else {
+            navigation.viewControllers.removeAll { $0 === self }
+        }
+    }
+
+    /// 보관함이 바뀜: 같은 앨범·같은 차례의 목록을 다시 읽고 보던 사진을 찾음.
+    /// 없어졌으면 같은 자리의 옆 사진으로, 목록이 비었으면 닫음
+    @objc private func libraryChanged() {
+        guard isViewLoaded else { return }
+        if transitionCoordinator != nil {
+            libraryChangePending = true
+            return
+        }
+        let new = Library.shared.list(for: folderID, newestFirst: newestFirst)
+        if new.version == list.version {
+            // 들어 있는 사진·순서는 같음: 새 값(즐겨찾기 등)만 받아 둠
+            list = new
+            freshAssets = [:]
+            scrubber.replaceList(new)
+            updateTitle()
+            return
+        }
+        let oldIndex = currentIndex
+        list = new
+        freshAssets = [:]
+        // 지운 사진이 새 목록에도 아직 있으면 계속 건너뜀
+        removedIDs = removedIDs.filter { new.index(ofID: $0) != nil }
+        scrubber.list = new
+        if let found = new.index(ofID: currentID, near: oldIndex), !removedIDs.contains(currentID) {
+            currentIndex = found
+            scrubber.setFocus(CGFloat(found), animated: false)
+            return
+        }
+        // 보던 사진이 없어짐
+        if infoShown { setInfo(false, animated: false) }
+        guard !new.isEmpty else {
+            closeEmpty()
+            return
+        }
+        let start = min(oldIndex, new.count - 1)
+        if !removedIDs.contains(new[start].localIdentifier) {
+            show(start)
+        } else if let next = neighbour(of: start) {
+            show(next)
+        } else {
+            closeEmpty()
+        }
     }
 
     // MARK: - 정보 카드의 버튼
@@ -1811,7 +1913,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
                 // PHAsset 은 바뀌지 않는 값이라 새로 받아 옴
                 let id = asset.localIdentifier
                 guard let fresh = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else { return }
-                if let at = self.indexByID[id], at < self.assets.count { self.assets[at] = fresh }
+                self.freshAssets[id] = fresh
                 page?.replaceAsset(fresh)
                 if id == self.currentID { self.updateTitle() }
             }
@@ -1881,15 +1983,13 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     }
 
     @objc private func toggleFavorite() {
-        guard let index = currentIndex else { return }
-        let asset = assets[index]
+        guard let asset = currentAsset else { return }
         let id = asset.localIdentifier
         Library.shared.setFavorite(asset, !asset.isFavorite) { [weak self] ok in
             guard ok, let self else { return }
-            // PHAsset 은 바뀌지 않는 값이라 새로 받아 옴
-            if let fresh = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject,
-               let at = self.indexByID[id], at < self.assets.count {
-                self.assets[at] = fresh
+            // PHAsset 은 바뀌지 않는 값이라 새로 받아 옴 (새 목록이 올 때까지 이것을 씀)
+            if let fresh = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject {
+                self.freshAssets[id] = fresh
             }
             self.updateTitle()
         }
