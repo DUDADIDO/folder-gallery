@@ -836,7 +836,7 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
                 options.alignmentRectProvider = { [weak grid] _ in
                     grid?.zoomCoverRect() ?? .zero
                 }
-                // 닫기는 왼쪽 가장자리에서 밀기 또는 맨 위에서 아래로 끌기만 (격자 가운데를 옆으로 쓸면 안 닫힘)
+                // 닫기는 오른쪽으로 쓸기(어디서든, 순정처럼) 또는 맨 위에서 아래로 끌기
                 options.interactiveDismissShouldBegin = { [weak grid] context in
                     guard let grid else { return false }
                     return grid.allowsZoomDismiss(location: ZoomGesture.point(context.location),

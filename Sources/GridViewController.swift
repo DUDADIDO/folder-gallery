@@ -818,6 +818,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         drag.delegate = self
         collectionView.addGestureRecognizer(drag)
         collectionView.panGestureRecognizer.require(toFail: drag)
+        // 고르지 않을 때는 꺼 둠 (꺼져 있어야 '어디서나 밀어서 뒤로'·스크롤과 부딪히지 않음)
+        drag.isEnabled = false
         dragSelectRecognizer = drag
 
         // 아래 막대 버튼(공유·⋯·휴지통)은 선택하는 동안에만 붙임 (setSelecting).
@@ -1324,11 +1326,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if hero.layer.cornerRadius != radius { hero.layer.cornerRadius = radius }
     }
 
-    /// 앨범 화면(카드에서 확대 전환으로 열림)에서는 iOS 26 의 '어디서나 밀어서 뒤로'를 끔.
-    /// 격자 한가운데를 옆으로 쓸어도 닫히지 않게. 왼쪽 가장자리에서 밀기와 위에서 아래로 끌기는 그대로
+    /// 예전엔 앨범 화면에서 '어디서나 밀어서 뒤로'를 껐지만, 순정 iOS 27 은 앨범 한가운데를 옆으로 쓸어도 뒤로 감.
+    /// 그래서 이제 막지 않음 (선택 중·보기 화면이 막는 것은 따로 그대로)
     private func blockSwipeAnywhereIfAlbum() {
-        guard opensWithZoom, navigationController?.topViewController === self else { return }
-        navigationController?.setBackSwipe(blocked: .anywhere, by: self)
     }
 
     /// 화면 전환이 진행 중이면 끝날 때까지 다시 그리기를 미룸 (확대 전환이 잡고 있는 칸이 바뀌거나 다시 배치되지 않게)
@@ -1351,7 +1351,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// (가운데를 옆으로 쓸기는 안 됨)
     func allowsZoomDismiss(location: CGPoint, velocity: CGPoint) -> Bool {
         if selecting || isPinching { return false }
-        if location.x <= 44 && velocity.x > 0 && velocity.x > abs(velocity.y) { return true }
+        // 순정 iOS 27: 앨범 어디서든 오른쪽으로 쓸면 닫힘 (가장자리만이 아님)
+        if velocity.x > 0 && velocity.x > abs(velocity.y) { return true }
         guard ZoomGesture.isDownward(velocity), isViewLoaded, collectionView != nil else { return false }
         let top = -collectionView.adjustedContentInset.top
         return collectionView.contentOffset.y <= top + 1
@@ -2324,6 +2325,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
         }
         collectionView.isEditing = on
+        dragSelectRecognizer?.isEnabled = on
         for cell in collectionView.visibleCells {
             (cell as? AssetCell)?.selecting = on
         }
