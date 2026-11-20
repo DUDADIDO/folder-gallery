@@ -63,6 +63,16 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
         Library.shared.start()
     }
 
+    /// 순정처럼 지금 탭을 다시 누르면: 안쪽 화면이면 맨 처음 화면으로, 처음 화면이면 최신 사진(끝)으로 스크롤
+    func tabBarController(_ tabBarController: UITabBarController, shouldSelect viewController: UIViewController) -> Bool {
+        if viewController === tabBarController.selectedViewController,
+           let nav = viewController as? UINavigationController, nav.viewControllers.count == 1,
+           let grid = nav.topViewController as? GridViewController {
+            grid.scrollToLatest(animated: true)
+        }
+        return true
+    }
+
     /// 숨긴 앨범 탭을 벗어나면 다시 잠금
     func tabBarController(_ tabBarController: UITabBarController, didSelect viewController: UIViewController) {
         if viewController !== hiddenNav {

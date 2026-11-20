@@ -116,6 +116,10 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
         pageScroll.isScrollEnabled = false
         pageScroll.scrollsToTop = false
         pageScroll.delegate = self
+        if #available(iOS 26.0, *) {
+            pageScroll.topEdgeEffect.isHidden = true
+            zoomScroll.topEdgeEffect.isHidden = true
+        }
         view.addSubview(pageScroll)
 
         mediaClip.clipsToBounds = true
@@ -880,7 +884,7 @@ final class VideoControlsView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         let background = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
-        background.layer.cornerRadius = 22
+        background.layer.cornerRadius = 24
         background.layer.cornerCurve = .continuous
         background.clipsToBounds = true
         background.translatesAutoresizingMaskIntoConstraints = false
@@ -908,11 +912,17 @@ final class VideoControlsView: UIView {
         slider.minimumValue = 0
         slider.maximumValue = 1
         slider.isContinuous = true
-        slider.minimumTrackTintColor = .label
         slider.addTarget(self, action: #selector(sliderBegan), for: .touchDown)
         slider.addTarget(self, action: #selector(sliderChanged), for: .valueChanged)
         slider.addTarget(self, action: #selector(sliderEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
 
+        // 순정 iOS 27: 시간 글자 없이 [재생] [막대] [소리]
+        elapsedLabel.isHidden = true
+        remainingLabel.isHidden = true
+        slider.setThumbImage(UIImage(), for: .normal)
+        slider.setThumbImage(UIImage(), for: .highlighted)
+        slider.setMinimumTrackImage(VideoControlsView.track(.secondaryLabel), for: .normal)
+        slider.setMaximumTrackImage(VideoControlsView.track(.label.withAlphaComponent(0.12)), for: .normal)
         let row = UIStackView(arrangedSubviews: [playButton, elapsedLabel, slider, remainingLabel, muteButton])
         row.axis = .horizontal
         row.alignment = .center
@@ -935,6 +945,16 @@ final class VideoControlsView: UIView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// 두꺼운 둥근 막대 그림 (늘려 씀)
+    static func track(_ color: UIColor) -> UIImage {
+        let height: CGFloat = 8
+        let image = UIGraphicsImageRenderer(size: CGSize(width: height + 2, height: height)).image { _ in
+            color.setFill()
+            UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: height + 2, height: height), cornerRadius: height / 2).fill()
+        }
+        return image.resizableImage(withCapInsets: UIEdgeInsets(top: 0, left: height / 2, bottom: 0, right: height / 2))
     }
 
     private static func clock(_ seconds: Double) -> String {
@@ -1102,10 +1122,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             scrubber.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrubber.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrubber.heightAnchor.constraint(equalToConstant: 40),
-            videoControls.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -8),
-            videoControls.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
-            videoControls.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
-            videoControls.heightAnchor.constraint(equalToConstant: 44),
+            // 순정 iOS 27: 영상 막대는 썸네일 줄 바로 위, 양옆 28
+            videoControls.bottomAnchor.constraint(equalTo: scrubber.topAnchor, constant: -10),
+            videoControls.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 28),
+            videoControls.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -28),
+            videoControls.heightAnchor.constraint(equalToConstant: 48),
             liveBadge.topAnchor.constraint(equalTo: guide.topAnchor, constant: 8),
             liveBadge.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
         ])
@@ -1519,8 +1540,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         }
         videoPage = isVideo ? page : nil
         videoControls.isHidden = !isVideo
-        // 영상이면 썸네일 줄을 영상 막대 위로
-        scrubberBottom?.constant = isVideo ? -(8 + 44 + 8) : -8
+        // 썸네일 줄은 늘 아래 막대 바로 위 (영상 막대가 그 위에)
+        scrubberBottom?.constant = -8
         page?.onPlaybackChange = { [weak self, weak page] in
             guard let self, let page, page === self.videoPage else { return }
             self.attachTimeObserverIfNeeded()

@@ -847,12 +847,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 최신 사진이 있는 끝으로 (오래된 순이면 맨 아래)
     private func scrollToLatest() {
-        guard collectionView != nil, !list.isEmpty else { return }
+        scrollToLatest(animated: false)
+    }
+
+    func scrollToLatest(animated: Bool) {
+        guard isViewLoaded, collectionView != nil, !list.isEmpty else { return }
         collectionView.layoutIfNeeded()
         let inset = collectionView.adjustedContentInset
         let y = newestFirst ? -inset.top
             : max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
-        collectionView.setContentOffset(CGPoint(x: collectionView.contentOffset.x, y: y), animated: false)
+        collectionView.setContentOffset(CGPoint(x: collectionView.contentOffset.x, y: y), animated: animated)
         updateTitleOverlay()
     }
 
