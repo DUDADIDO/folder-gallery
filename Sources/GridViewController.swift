@@ -1,4 +1,5 @@
 import Photos
+import PhotosUI
 import UIKit
 
 final class AssetCell: UICollectionViewCell {
@@ -747,6 +748,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         collectionView.allowsMultipleSelection = false
         collectionView.allowsMultipleSelectionDuringEditing = true
         collectionView.register(AssetCell.self, forCellWithReuseIdentifier: AssetCell.reuse)
+        collectionView.register(AddTileCell.self, forCellWithReuseIdentifier: AddTileCell.reuse)
         collectionView.register(DayHeaderView.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
                                 withReuseIdentifier: DayHeaderView.reuse)
         collectionView.register(HeroHeaderView.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
@@ -1087,9 +1089,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 손가락 아래의 사진 (사이 틈이나 머리글 위면 가장 가까운 사진)
     private func nearestItem(to point: CGPoint) -> IndexPath? {
-        if let path = collectionView.indexPathForItem(at: point) { return path }
+        if let path = collectionView.indexPathForItem(at: point), !isAddTile(path) { return path }
         var best: (path: IndexPath, distance: CGFloat)?
-        for path in collectionView.indexPathsForVisibleItems {
+        for path in collectionView.indexPathsForVisibleItems where !isAddTile(path) {
             guard let frame = gridLayout.layoutAttributesForItem(at: path)?.frame else { continue }
             let dx = max(frame.minX - point.x, 0, point.x - frame.maxX)
             let dy = max(frame.minY - point.y, 0, point.y - frame.maxY)
@@ -1387,7 +1389,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let stayAtLatest = isRoot && !needsScrollToLatest && isAtLatest
         list = new
         buildSections()
-        gridLayout.setSections(sections.map { $0.range.count })
+        gridLayout.setSections(layoutCounts)
         collectionView.reloadData()
         if !Library.shared.canRead {
             emptyLabel.text = "사진 접근 권한이 필요해요.\n앨범 탭에서 설정을 열 수 있어요."
@@ -1411,7 +1413,36 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 나머지는 한 묶음으로 둔 뒤, 전체 묶음을 Library 가 뒤에서 계산해 오면 바꿔 넣음
     private func buildSections() {
         // 날짜로 나누지 않고 한 덩어리 (앨범 안, 그리고 순정 iOS 27 처럼 보관함·미분류도)
-        sections = list.isEmpty ? [] : [(day: Date(), range: 0..<list.count)]
+        // 내 앨범은 비어 있어도 표지와 '+' 칸이 보이게 한 덩어리를 둠
+        sections = list.isEmpty && !showsAddTile ? [] : [(day: Date(), range: 0..<list.count)]
+    }
+
+    // MARK: - 내 앨범 끝의 '+' 칸 (순정 iOS 27: 누르면 사진을 골라 이 앨범에 넣음)
+
+    /// 사진 앱에서 만든 내 앨범이고, 고른 것만 보는 중이 아닐 때
+    private var showsAddTile: Bool {
+        !isRoot && folder.albumID != nil && listBeforeShowingSelected == nil
+    }
+
+    /// 배치에 넘기는 칸 수 (마지막 묶음에 '+' 칸 하나 더)
+    private var layoutCounts: [Int] {
+        var counts = sections.map { $0.range.count }
+        if showsAddTile, !counts.isEmpty { counts[counts.count - 1] += 1 }
+        return counts
+    }
+
+    private func isAddTile(_ indexPath: IndexPath) -> Bool {
+        showsAddTile && indexPath.section == sections.count - 1 && indexPath.item == sections[indexPath.section].range.count
+    }
+
+    private func presentAddPicker() {
+        var config = PHPickerConfiguration(photoLibrary: .shared())
+        config.selectionLimit = 0
+        config.selection = .ordered
+        config.preferredAssetRepresentationMode = .current
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = self
+        present(picker, animated: true)
     }
 
     /// 최신순인지. 순정 iOS 27 처럼 보관함·미분류·앨범 모두 오래된 순(최신이 맨 아래)이 기본, 정렬 메뉴로 바꿈
@@ -1522,10 +1553,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        sections[section].range.count
+        sections[section].range.count + (showsAddTile && section == sections.count - 1 ? 1 : 0)
     }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+        if isAddTile(indexPath) {
+            return collectionView.dequeueReusableCell(withReuseIdentifier: AddTileCell.reuse, for: indexPath)
+        }
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: AssetCell.reuse, for: indexPath) as! AssetCell
         let asset = assetAt(indexPath)
         let id = asset.localIdentifier
@@ -1652,6 +1686,15 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     // MARK: - 누르기·선택
+
+    func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
+        // '+' 칸은 고를 수 없고, 선택 중이 아닐 때 누르면 사진 고르기
+        if isAddTile(indexPath) {
+            if !selecting, !isPinching { presentAddPicker() }
+            return false
+        }
+        return true
+    }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         if selecting {
@@ -2096,7 +2139,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 지금 list 로 격자를 다시 그리고 keep 을 다시 고름
     private func reloadShown(keeping keep: [String]) {
         buildSections()
-        gridLayout.setSections(sections.map { $0.range.count })
+        gridLayout.setSections(layoutCounts)
         collectionView.reloadData()
         collectionView.layoutIfNeeded()
         for flat in list.indexes(ofIDs: keep) {
@@ -2310,5 +2353,52 @@ final class AssetPreviewController: UIViewController {
         PHImageManager.default().requestImage(for: asset, targetSize: target, contentMode: .aspectFill, options: options) { [weak self] image, _ in
             if let image { self?.imageView.image = image }
         }
+    }
+}
+
+// MARK: - '+' 칸 사진 고르기
+
+extension GridViewController: PHPickerViewControllerDelegate {
+    func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+        picker.dismiss(animated: true)
+        let ids = results.compactMap(\.assetIdentifier)
+        guard !ids.isEmpty, let albumID = folder.albumID, let album = Library.shared.album(id: albumID) else { return }
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        var assets: [PHAsset] = []
+        fetched.enumerateObjects { asset, _, _ in assets.append(asset) }
+        guard !assets.isEmpty else { return }
+        Library.shared.move(assets, to: album, from: nil) { [weak self] ok in
+            self?.toast(ok ? "\(assets.count)개 항목을 추가했어요" : "추가하지 못했어요")
+        }
+    }
+}
+
+/// 내 앨범 끝의 '+' 칸 (순정처럼 옅은 회색 바탕에 파란 +)
+final class AddTileCell: UICollectionViewCell {
+    static let reuse = "AddTileCell"
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contentView.backgroundColor = .secondarySystemBackground
+        let plus = UIImageView(image: UIImage(systemName: "plus",
+                                              withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .medium)))
+        plus.tintColor = .systemBlue
+        plus.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(plus)
+        NSLayoutConstraint.activate([
+            plus.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            plus.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
+        isAccessibilityElement = true
+        accessibilityLabel = "사진 추가"
+        accessibilityTraits = .button
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isHighlighted: Bool {
+        didSet { contentView.alpha = isHighlighted ? 0.6 : 1 }
     }
 }
