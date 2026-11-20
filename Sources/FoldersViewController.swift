@@ -180,7 +180,8 @@ final class AlbumCell: UICollectionViewCell {
         switch style {
         case .card:
             placeCard(bounds)
-            setCardCorner(26)
+            // 순정 iOS 27 모음의 앨범 카드: 한 변의 약 13% 둥글게 (115pt 카드에 15pt)
+            setCardCorner(max(12, (bounds.width * 0.13).rounded()))
             contentView.layer.shadowOpacity = 0.08
             separator.isHidden = true
             countIcon.isHidden = true
@@ -191,18 +192,18 @@ final class AlbumCell: UICollectionViewCell {
                 card.backgroundColor = .secondarySystemGroupedBackground
                 coverView.isHidden = true
                 shade.isHidden = true
-                let pad: CGFloat = 12, gap: CGFloat = 10, footer: CGFloat = 46
+                let pad: CGFloat = 8, gap: CGFloat = 6, footer: CGFloat = 34
                 let tileWidth = (bounds.width - pad * 2 - gap) / 2
                 let tileHeight = max(10, (bounds.height - pad - footer - gap) / 2)
                 for (index, tile) in tiles.enumerated() {
                     tile.isHidden = false
-                    tile.layer.cornerRadius = 10
+                    tile.layer.cornerRadius = 6
                     let column = CGFloat(index % 2), row = CGFloat(index / 2)
                     tile.frame = CGRect(x: pad + column * (tileWidth + gap), y: pad + row * (tileHeight + gap),
                                         width: tileWidth, height: tileHeight)
                 }
                 titleLabel.textColor = .label
-                titleLabel.frame = CGRect(x: 20, y: bounds.height - footer + 8, width: bounds.width - 40, height: 26)
+                titleLabel.frame = CGRect(x: 12, y: bounds.height - footer + 4, width: bounds.width - 24, height: 24)
             } else {
                 // 사진이 카드 전체, 아래에 흰 이름
                 card.backgroundColor = .systemGray5
@@ -212,10 +213,11 @@ final class AlbumCell: UICollectionViewCell {
                     tile.isHidden = true
                 }
                 shade.isHidden = false
-                shade.frame = CGRect(x: 0, y: bounds.height * 0.68, width: bounds.width, height: bounds.height * 0.32)
+                shade.frame = CGRect(x: 0, y: bounds.height * 0.55, width: bounds.width, height: bounds.height * 0.45)
                 placeholder.frame = CGRect(x: bounds.midX - 22, y: bounds.midY - 30, width: 44, height: 36)
                 titleLabel.textColor = .white
-                titleLabel.frame = CGRect(x: 18, y: bounds.height - 44, width: bounds.width - 36, height: 26)
+                // 순정처럼 왼쪽 아래에 흰 이름
+                titleLabel.frame = CGRect(x: 10, y: bounds.height - 34, width: bounds.width - 20, height: 24)
             }
         case .row:
             contentView.layer.shadowOpacity = 0
@@ -269,7 +271,7 @@ final class SectionHeaderView: UICollectionReusableView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        label.font = .systemFont(ofSize: 20, weight: .bold)
+        label.font = .systemFont(ofSize: 22, weight: .bold)
         label.translatesAutoresizingMaskIntoConstraints = false
         detail.font = .systemFont(ofSize: 13)
         detail.textColor = .secondaryLabel
@@ -348,7 +350,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemGroupedBackground
-        navigationItem.largeTitleDisplayMode = .never
+        // 순정 iOS 27 모음처럼: 탭 첫 화면(앨범·숨긴 앨범)은 왼쪽 큰 제목, 폴더 안은 작은 제목
+        navigationItem.largeTitleDisplayMode = mode == .top || mode == .hidden ? .always : .never
         switch mode {
         case .top:
             navigationItem.title = "앨범"
@@ -372,6 +375,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         collectionView.register(SectionHeaderView.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
                                 withReuseIdentifier: SectionHeaderView.reuse)
         view.addSubview(collectionView)
+        // 큰 제목이 스크롤을 따라 접히게
+        setContentScrollView(collectionView)
 
         setUpMessageView()
         refreshMenu()
@@ -441,22 +446,25 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
 
     private func makeLayout() -> UICollectionViewLayout {
         UICollectionViewCompositionalLayout { [weak self] index, environment in
-            let inset: CGFloat = 20
+            // 순정 iOS 27 모음: 양옆 16, 카드 사이 8, 한 줄에 3칸 (iPhone 14 Pro 에서 약 115pt)
+            let inset: CGFloat = 16
+            let gap: CGFloat = 8
             let width = environment.container.effectiveContentSize.width
+            let cardSide = max(80, floor((width - inset * 2 - gap * 2) / 3))
             let auto = self?.groups.indices.contains(index) == true && self?.groups[index].isAuto == true
             let list = self?.listMode ?? false
 
             let section: NSCollectionLayoutSection
             if auto {
                 // 자동 분류: 옆으로 넘기는 작은 카드
-                let side: CGFloat = 132
+                let side = cardSide
                 let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(widthDimension: .absolute(side),
                                                                                      heightDimension: .absolute(side)))
                 let group = NSCollectionLayoutGroup.horizontal(layoutSize: NSCollectionLayoutSize(widthDimension: .absolute(side),
                                                                                                   heightDimension: .absolute(side)),
                                                                subitems: [item])
                 section = NSCollectionLayoutSection(group: group)
-                section.interGroupSpacing = 12
+                section.interGroupSpacing = gap
                 section.orthogonalScrollingBehavior = .continuous
                 section.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: inset, bottom: 22, trailing: inset)
             } else if list {
@@ -470,9 +478,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
                 section = NSCollectionLayoutSection(group: group)
                 section.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: inset, bottom: 24, trailing: inset)
             } else {
-                // 칸 크기를 화면 너비에서 직접 계산 (두 칸)
-                let gap: CGFloat = 12
-                let side = max(60, floor((width - inset * 2 - gap) / 2))
+                // 칸 크기를 화면 너비에서 직접 계산 (세 칸, 순정 모음과 같게)
+                let side = cardSide
                 let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(widthDimension: .absolute(side),
                                                                                      heightDimension: .absolute(side)))
                 let groupSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(side))

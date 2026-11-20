@@ -87,7 +87,7 @@ enum Prefs {
     static var albumGridColumns: Int {
         get {
             let value = defaults.integer(forKey: "albumGridColumns")
-            return value > 0 ? value : 5
+            return value > 0 ? value : 3   // 순정 iOS 27 앨범 기본 3칸
         }
         set { defaults.set(newValue, forKey: "albumGridColumns") }
     }

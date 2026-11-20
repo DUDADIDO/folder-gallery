@@ -178,6 +178,9 @@ final class HeroHeaderView: UICollectionReusableView {
     let titleLabel = UILabel()
     let countLabel = UILabel()
     private let glyph = UIImageView(image: UIImage(systemName: "rectangle.stack"))
+    /// 오른쪽 아래 재생(슬라이드쇼) 버튼 — 순정처럼 반투명 원
+    let playButton = UIButton(type: .system)
+    var onPlay: (() -> Void)?
     private let shade = CAGradientLayer()
     var assetID: String?
     var requestID: PHImageRequestID = PHInvalidImageRequestID
@@ -189,6 +192,7 @@ final class HeroHeaderView: UICollectionReusableView {
             titleLabel.alpha = newValue
             countLabel.alpha = newValue
             glyph.alpha = newValue
+            playButton.alpha = newValue
         }
     }
 
@@ -203,18 +207,26 @@ final class HeroHeaderView: UICollectionReusableView {
         addSubview(imageView)
         shade.colors = [UIColor.clear.cgColor, UIColor.black.withAlphaComponent(0.6).cgColor]
         layer.addSublayer(shade)
-        titleLabel.font = .systemFont(ofSize: 34, weight: .bold)
+        titleLabel.font = .systemFont(ofSize: 40, weight: .bold)
         titleLabel.textColor = .white
         addSubview(titleLabel)
         titleLabel.adjustsFontSizeToFitWidth = true
         titleLabel.minimumScaleFactor = 0.6
-        countLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        countLabel.font = .systemFont(ofSize: 17, weight: .semibold)
         countLabel.textColor = .white
         addSubview(countLabel)
         glyph.tintColor = .white
         glyph.contentMode = .scaleAspectFit
         glyph.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
         addSubview(glyph)
+        var config = UIButton.Configuration.filled()
+        config.image = UIImage(systemName: "play.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .bold))
+        config.baseForegroundColor = .white
+        config.baseBackgroundColor = UIColor.white.withAlphaComponent(0.3)
+        config.cornerStyle = .capsule
+        playButton.configuration = config
+        playButton.addAction(UIAction { [weak self] _ in self?.onPlay?() }, for: .primaryActionTriggered)
+        addSubview(playButton)
     }
 
     required init?(coder: NSCoder) {
@@ -229,9 +241,11 @@ final class HeroHeaderView: UICollectionReusableView {
         shade.frame = CGRect(x: 0, y: bounds.height * 0.5, width: bounds.width, height: bounds.height * 0.5)
         CATransaction.commit()
         // 왼쪽 아래: 이름, 그 아래 작은 앨범 모양 + "10개의 항목"
-        glyph.frame = CGRect(x: 20, y: bounds.height - 36, width: 16, height: 16)
-        countLabel.frame = CGRect(x: 41, y: bounds.height - 39, width: bounds.width - 61, height: 22)
-        titleLabel.frame = CGRect(x: 20, y: bounds.height - 82, width: bounds.width - 40, height: 42)
+        // 순정 iOS 27: 왼쪽 16, 이름 40pt 굵게, 그 아래 앨범 모양 + "항목 N개", 오른쪽 아래 재생 버튼
+        glyph.frame = CGRect(x: 16, y: bounds.height - 38, width: 18, height: 18)
+        countLabel.frame = CGRect(x: 40, y: bounds.height - 41, width: bounds.width - 120, height: 24)
+        titleLabel.frame = CGRect(x: 16, y: bounds.height - 92, width: bounds.width - 100, height: 50)
+        playButton.frame = CGRect(x: bounds.width - 16 - 44, y: bounds.height - 18 - 44, width: 44, height: 44)
     }
 }
 
@@ -240,6 +254,8 @@ final class HeroHeaderView: UICollectionReusableView {
 /// 사진은 제자리에서 커지고 작아질 뿐 다른 자리로 옮겨 가지 않음 — 배치가 바뀌는 순간은 격자 화면이 짧게 겹쳐 바꿈.
 /// 1칸은 사진마다 원래 비율로 화면 너비를 꽉 채움. 묶음마다 맨 위에 머리글(날짜) 또는 정사각형 앨범 표지
 final class PhotoGridLayout: UICollectionViewLayout {
+    /// 앨범 표지 높이 ÷ 화면 너비 (순정 iOS 27 앨범 화면: iPhone 14 Pro 393pt 너비에 약 480pt)
+    static let coverRatio: CGFloat = 1.22
     /// 칸 크기를 바꾸는 중인 상태: columns 배치의 사진 줄(높이·사이)을 scale 배로. 머리글 높이는 그대로
     struct Zoom {
         /// 그리는 배치의 칸 수
@@ -326,7 +342,7 @@ final class PhotoGridLayout: UICollectionViewLayout {
         let spacing = PhotoGridLayout.spacing
         let perRow = max(1, columns)
         let side = perRow == 1 ? width : max(20, floor((width - spacing * CGFloat(perRow - 1)) / CGFloat(perRow)))
-        let header = headerHeight ?? width
+        let header = headerHeight ?? (width * PhotoGridLayout.coverRatio).rounded()
         var geometry = Geometry(columns: perRow, x: originX, width: width, side: side, header: header)
         geometry.tops.reserveCapacity(counts.count + 1)
         var y: CGFloat = 0
@@ -382,7 +398,7 @@ final class PhotoGridLayout: UICollectionViewLayout {
     /// 앨범 표지의 높이 (맨 위 묶음의 머리글. 칸 크기를 바꿔도 그대로). 날짜 머리글이면 nil
     var coverHeight: CGFloat? {
         guard headerHeight == nil, !counts.isEmpty else { return nil }
-        return width
+        return (width * PhotoGridLayout.coverRatio).rounded()
     }
 
     /// 사진 줄을 scale 배로 했을 때 묶음 section 의 맨 위 (머리글은 그대로). section 이 묶음 수면 전체 높이
@@ -691,7 +707,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 앨범 안에서도 순정처럼 아래 탭 막대를 그대로 둠 (닫히는 확대 전환 끝에서 화면이 덜컥이지 않게)
         var saved = isRoot ? Prefs.gridColumns : Prefs.albumGridColumns
         if saved == 4 { saved = 3 }   // 예전의 4칸은 3칸으로
-        columns = levels.contains(saved) ? saved : (isRoot ? 3 : 5)
+        // 순정 iOS 27 은 보관함·앨범 모두 3칸이 기본
+        columns = levels.contains(saved) ? saved : 3
     }
 
     required init?(coder: NSCoder) {
@@ -1419,8 +1436,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     func zoomCoverRect() -> CGRect {
         var size = isViewLoaded ? view.bounds.size : .zero
         if size.width <= 0 { size = navigationController?.view.bounds.size ?? .zero }
-        let side = min(size.width, size.height > 0 ? size.height : size.width)
-        return CGRect(x: 0, y: 0, width: size.width, height: side)
+        let cover = (size.width * PhotoGridLayout.coverRatio).rounded()
+        let height = min(cover, size.height > 0 ? size.height : cover)
+        return CGRect(x: 0, y: 0, width: size.width, height: height)
     }
 
     /// 목록 안의 차례 → 칸 자리 (묶음을 반으로 나눠 찾음)
@@ -1577,7 +1595,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func configureHero(_ hero: HeroHeaderView) {
         let snapshot = Library.shared.snapshot
         hero.titleLabel.text = snapshot.nodes[folder.id]?.title ?? folder.title
-        hero.countLabel.text = "\(list.count)개의 항목"
+        hero.countLabel.text = "항목 \(list.count.formatted())개"
+        hero.playButton.isHidden = list.isEmpty
+        hero.onPlay = { [weak self] in self?.startSlideshow() }
         // 사진 앱 앨범은 그 앨범의 대표 사진, 아니면 가장 최근 사진 (앨범 카드와 같은 사진)
         guard let cover = snapshot.cover(folder.id) ?? list.last else { return }
         let id = cover.localIdentifier
@@ -1587,7 +1607,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
         hero.assetID = id
         let scale = traitCollection.displayScale
-        let size = CGSize(width: view.bounds.width * scale, height: view.bounds.width * scale)
+        let size = CGSize(width: view.bounds.width * scale, height: view.bounds.width * PhotoGridLayout.coverRatio * scale)
         let options = PHImageRequestOptions()
         options.deliveryMode = .opportunistic
         options.isNetworkAccessAllowed = true
@@ -1941,11 +1961,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 ]
             } else {
                 // 순정 앨범 화면처럼: [정렬 ⋯] [선택]
-                var items: [UIBarButtonItem] = [select, UIBarButtonItem.fixedSpace(8)]
+                // 순정 iOS 27 앨범 화면: 왼쪽부터 [⋯] [정렬] [선택], 각각 따로 떨어진 원
+                var items: [UIBarButtonItem] = [select, UIBarButtonItem.fixedSpace(8),
+                                                UIBarButtonItem(image: UIImage(systemName: "line.3.horizontal.decrease"), menu: makeSortMenu())]
                 if folder.isUser {
+                    items.append(UIBarButtonItem.fixedSpace(8))
                     items.append(UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeAlbumMenu()))
                 }
-                items.append(UIBarButtonItem(image: UIImage(systemName: "line.3.horizontal.decrease"), menu: makeSortMenu()))
                 navigationItem.rightBarButtonItems = items
             }
         }
@@ -2009,6 +2031,18 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         reloadFromLibrary(force: true)
         if isRoot { view.setNeedsLayout() }
         updateChrome()
+    }
+
+    /// 앨범 표지의 재생 버튼: 앨범 처음부터 슬라이드쇼
+    private func startSlideshow() {
+        guard !list.isEmpty else { return }
+        let current = list
+        let show = SlideshowViewController(count: current.count, start: 0) { index in
+            index < current.count ? current[index] : nil
+        }
+        show.modalPresentationStyle = .fullScreen
+        show.modalTransitionStyle = .crossDissolve
+        present(show, animated: true)
     }
 
     /// 사진 앱 앨범에서 실제로 할 수 있는 것만: 이름 변경 · 앨범 삭제
