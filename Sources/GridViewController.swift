@@ -2343,6 +2343,9 @@ enum GridSort: String {
 // MARK: - 보관함 위 제목 (순정 iOS 27: 사진 위 어두운 그라데이션 + 흰 큰 제목 + 날짜·개수)
 
 final class LibraryTitleOverlay: UIView {
+    /// 순정처럼 제목 뒤 사진이 흐려짐 (위는 많이, 아래로 갈수록 없어짐)
+    private let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+    private let blurMask = CAGradientLayer()
     private let gradient = CAGradientLayer()
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
@@ -2383,6 +2386,10 @@ final class LibraryTitleOverlay: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
+        blurMask.colors = [UIColor.black.cgColor, UIColor.black.withAlphaComponent(0.6).cgColor, UIColor.clear.cgColor]
+        blurMask.locations = [0, 0.5, 1]
+        blur.layer.mask = blurMask
+        addSubview(blur)
         layer.addSublayer(gradient)
         titleLabel.font = .systemFont(ofSize: 34, weight: .bold)
         titleLabel.adjustsFontForContentSizeCategory = false
@@ -2398,7 +2405,9 @@ final class LibraryTitleOverlay: UIView {
 
     private func applyStyle() {
         gradient.isHidden = !dark
-        gradient.colors = [UIColor.black.withAlphaComponent(0.55).cgColor, UIColor.black.withAlphaComponent(0.25).cgColor,
+        blur.isHidden = !dark
+        // 순정 iOS 27 보관함과 비교해 맞춘 진하기
+        gradient.colors = [UIColor.black.withAlphaComponent(0.5).cgColor, UIColor.black.withAlphaComponent(0.28).cgColor,
                            UIColor.black.withAlphaComponent(0).cgColor]
         gradient.locations = [0, 0.55, 1]
         titleLabel.textColor = dark ? .white : .label
@@ -2416,6 +2425,8 @@ final class LibraryTitleOverlay: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         gradient.frame = bounds
+        blur.frame = bounds
+        blurMask.frame = blur.bounds
         CATransaction.commit()
         titleLabel.sizeToFit()
         subtitleLabel.sizeToFit()
