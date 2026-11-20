@@ -1,3 +1,4 @@
+import MapKit
 import Photos
 import PhotosUI
 import UIKit
@@ -2149,7 +2150,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 사진 앱 앨범에서 실제로 할 수 있는 것만: 이름 변경 · 앨범 삭제
     private func makeAlbumMenu() -> UIMenu {
         let id = folder.id
-        let rename = UIAction(title: "이름 변경", image: UIImage(systemName: "pencil")) { [weak self] _ in
+        let renameHandler: UIActionHandler = { [weak self] _ in
             guard let self else { return }
             let current = Library.shared.snapshot.nodes[id]?.title ?? self.folder.title
             self.promptText(title: "이름 변경", initial: current, placeholder: "이름", confirm: "저장") { name in
@@ -2163,7 +2164,45 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 Library.shared.deleteCollection(id)
             }
         }
-        return UIMenu(children: [rename, delete])
+        // 순정 iOS 27 앨범 ⋯ 메뉴: [표지·이름·장수(누르면 이름 변경)] / 사진 추가 · 지도 보기 · 슬라이드쇼 시작 / 앨범 삭제
+        // 장수·표지가 바뀌므로 열 때마다 새로 만듦
+        let header = UIDeferredMenuElement.uncached { [weak self] completion in
+            guard let self else { completion([]); return }
+            let title = Library.shared.snapshot.nodes[id]?.title ?? self.folder.title
+            let item = UIAction(title: title, subtitle: "항목 \(self.list.count.formatted())개",
+                                image: self.albumMenuThumbnail(), handler: renameHandler)
+            completion([item])
+        }
+        let actions = UIMenu(options: .displayInline, children: [
+            UIAction(title: "사진 추가", image: UIImage(systemName: "plus")) { [weak self] _ in self?.presentAddPicker() },
+            UIAction(title: "지도 보기", image: UIImage(systemName: "map")) { [weak self] _ in self?.showAlbumMap() },
+            UIAction(title: "슬라이드쇼 시작", image: UIImage(systemName: "play.rectangle")) { [weak self] _ in self?.startSlideshow() },
+        ])
+        return UIMenu(children: [UIMenu(options: .displayInline, children: [header]), actions,
+                                 UIMenu(options: .displayInline, children: [delete])])
+    }
+
+    /// 메뉴 머리의 작은 표지 (표지 그림을 둥근 정사각형으로)
+    private func albumMenuThumbnail() -> UIImage? {
+        let kind = UICollectionView.elementKindSectionHeader
+        let hero = collectionView.indexPathsForVisibleSupplementaryElements(ofKind: kind).lazy
+            .compactMap { self.collectionView.supplementaryView(forElementKind: kind, at: $0) as? HeroHeaderView }.first
+        guard let image = hero?.imageView.image else { return UIImage(systemName: "rectangle.stack") }
+        let side: CGFloat = 40
+        let format = UIGraphicsImageRendererFormat.default()
+        return UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format).image { _ in
+            UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: side, height: side), cornerRadius: 8).addClip()
+            let scale = max(side / image.size.width, side / image.size.height)
+            let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+            image.draw(in: CGRect(x: (side - size.width) / 2, y: (side - size.height) / 2, width: size.width, height: size.height))
+        }.withRenderingMode(.alwaysOriginal)
+    }
+
+    /// 지도 보기: 앨범 사진의 위치를 지도에
+    private func showAlbumMap() {
+        let map = AssetMapViewController(assets: list.array(), title: Library.shared.snapshot.nodes[folder.id]?.title ?? folder.title)
+        let nav = UINavigationController(rootViewController: map)
+        present(nav, animated: true)
     }
 
     // MARK: - 아래 막대
@@ -2474,5 +2513,53 @@ final class AddTileCell: UICollectionViewCell {
 
     override var isHighlighted: Bool {
         didSet { contentView.alpha = isHighlighted ? 0.6 : 1 }
+    }
+}
+
+// MARK: - 앨범 지도 (위치가 있는 사진을 지도에 핀으로)
+
+final class AssetMapViewController: UIViewController {
+    private let assets: [PHAsset]
+    private let mapView = MKMapView()
+
+    init(assets: [PHAsset], title: String) {
+        self.assets = assets.filter { $0.location != nil }
+        super.init(nibName: nil, bundle: nil)
+        self.title = title
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+        navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
+            self?.dismiss(animated: true)
+        })
+        mapView.frame = view.bounds
+        mapView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(mapView)
+        let pins = assets.compactMap { asset -> MKPointAnnotation? in
+            guard let location = asset.location else { return nil }
+            let pin = MKPointAnnotation()
+            pin.coordinate = location.coordinate
+            return pin
+        }
+        mapView.addAnnotations(pins)
+        if pins.isEmpty {
+            let label = UILabel()
+            label.text = "위치 정보가 있는 사진이 없어요"
+            label.textColor = .secondaryLabel
+            label.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+                label.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
+            ])
+        } else {
+            mapView.showAnnotations(pins, animated: false)
+        }
     }
 }
