@@ -1349,6 +1349,18 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     /// 아래 막대를 내비게이션의 아래 막대가 있던 자리(홈 막대 바로 위)에 놓고,
     /// 그 막대처럼 보이는 동안은 안전 영역 아래를 막대 높이만큼 올림 (썸네일 줄·영상 막대·사진 자리가 예전 그대로).
     /// 막대 자리는 우리가 더한 만큼을 뺀 안전 영역으로 셈 (막대 자리 ↔ 더한 안전 영역이 서로 물고 돌지 않게)
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        // 돌린 뒤 아래 막대가 가로 크기(작은 아이콘·낮은 자리)로 남지 않게 다시 잼
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            guard let self else { return }
+            self.bottomBar.setNeedsLayout()
+            self.bottomBar.layoutIfNeeded()
+            self.layoutBottomBar()
+            self.view.setNeedsLayout()
+        }
+    }
+
     private func layoutBottomBar() {
         let bounds = view.bounds
         guard bounds.width > 0 else { return }
