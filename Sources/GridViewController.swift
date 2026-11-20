@@ -2646,12 +2646,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 Library.shared.rename(id, to: name)
             }
         }
-        let delete = UIAction(title: "앨범 삭제", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
-            guard let self else { return }
-            let title = Library.shared.snapshot.nodes[id]?.title ?? self.folder.title
-            self.confirm(title: "'\(title)' 을(를) 삭제할까요?", message: "앨범만 삭제돼요. 사진은 삭제되지 않아요.", action: "삭제") {
-                Library.shared.deleteCollection(id)
-            }
+        let delete = UIAction(title: "앨범 삭제", image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
+            // iOS 가 직접 묻는 확인창 하나만 (순정처럼 한 번)
+            Library.shared.deleteCollection(id)
         }
         // 순정 iOS 27 앨범 ⋯ 메뉴: [표지·이름·장수(누르면 이름 변경)] / 사진 추가 · 지도 보기 · 슬라이드쇼 시작 / 앨범 삭제
         // 장수·표지가 바뀌므로 열 때마다 새로 만듦

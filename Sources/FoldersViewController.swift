@@ -1022,11 +1022,14 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         toast(on ? "'\(folder.title)' 을(를) 숨겼어요. '숨긴 앨범' 탭에서 볼 수 있어요" : "'\(folder.title)' 을(를) 다시 보이게 했어요")
     }
 
+    /// 앨범은 iOS 가 직접 묻는 확인창 하나만 (순정처럼 한 번). 폴더는 안의 앨범까지 지워지니 먼저 알려 줌
     private func deleteCollection(_ folder: Folder) {
-        let message = folder.isGroup
-            ? "폴더와 그 안의 앨범이 삭제돼요. 사진은 삭제되지 않아요."
-            : "앨범만 삭제돼요. 사진은 삭제되지 않아요."
-        confirm(title: "'\(folder.title)' 을(를) 삭제할까요?", message: message, action: "삭제") {
+        guard folder.isGroup else {
+            Library.shared.deleteCollection(folder.id)
+            return
+        }
+        confirm(title: "'\(folder.title)' 을(를) 삭제할까요?", message: "폴더와 그 안의 앨범이 삭제돼요. 사진은 삭제되지 않아요.",
+                action: "삭제") {
             Library.shared.deleteCollection(folder.id)
         }
     }
