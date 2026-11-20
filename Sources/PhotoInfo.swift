@@ -1150,16 +1150,27 @@ final class LocationSearchViewController: UITableViewController, UISearchBarDele
         searchBar.searchBarStyle = .minimal
         searchBar.delegate = self
         // 순정처럼 양옆 여백을 더 두고, 위아래에 가는 선
-        let header = UIView(frame: CGRect(x: 0, y: 0, width: view.bounds.width, height: 64))
-        searchBar.frame = header.bounds.insetBy(dx: 8, dy: 4)
-        searchBar.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        let header = UIView(frame: CGRect(x: 0, y: 0, width: 393, height: 64))
+        searchBar.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(searchBar)
-        for y in [CGFloat(0), 64 - 1 / UIScreen.main.scale] {
-            let line = UIView(frame: CGRect(x: 16, y: y, width: header.bounds.width - 32, height: 1 / UIScreen.main.scale))
+        var constraints = [
+            searchBar.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 8),
+            searchBar.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -8),
+            searchBar.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+        ]
+        for top in [true, false] {
+            let line = UIView()
             line.backgroundColor = .separator
-            line.autoresizingMask = [.flexibleWidth]
+            line.translatesAutoresizingMaskIntoConstraints = false
             header.addSubview(line)
+            constraints += [
+                line.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 16),
+                line.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -16),
+                line.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale),
+                top ? line.topAnchor.constraint(equalTo: header.topAnchor) : line.bottomAnchor.constraint(equalTo: header.bottomAnchor),
+            ]
         }
+        NSLayoutConstraint.activate(constraints)
         tableView.tableHeaderView = header
         completer.delegate = self
         completer.resultTypes = [.address, .pointOfInterest]
