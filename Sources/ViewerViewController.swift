@@ -1741,7 +1741,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             finish(true)
             return
         }
-        UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0.2,
+        // 순정을 녹화해 잰 값: 처음엔 천천히 출발해 0.4초쯤에 튀지 않고 멈춤
+        UIView.animate(springDuration: 0.4, bounce: 0, initialSpringVelocity: 0, delay: 0,
                        options: [.allowUserInteraction, .beginFromCurrentState], animations: {
             self.applyInfo(target, to: page)
             self.setNeedsStatusBarAppearanceUpdate()
