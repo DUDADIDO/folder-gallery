@@ -256,6 +256,8 @@ final class HeroHeaderView: UICollectionReusableView {
 /// 사진은 제자리에서 커지고 작아질 뿐 다른 자리로 옮겨 가지 않음 — 배치가 바뀌는 순간은 격자 화면이 짧게 겹쳐 바꿈.
 /// 1칸은 사진마다 원래 비율로 화면 너비를 꽉 채움. 묶음마다 맨 위에 머리글(날짜) 또는 정사각형 앨범 표지
 final class PhotoGridLayout: UICollectionViewLayout {
+    /// 보관함을 끝까지 오므린 칸 수
+    static let denseColumns = 15
     /// 앨범 표지 높이 ÷ 화면 너비 (순정 iOS 27 앨범 화면: iPhone 14 Pro 393pt 너비에 약 480pt)
     static let coverRatio: CGFloat = 1.22
     /// 칸 크기를 바꾸는 중인 상태: columns 배치의 사진 줄(높이·사이)을 scale 배로. 머리글 높이는 그대로
@@ -616,6 +618,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private var sections: DaySections = []
     /// 보관함·미분류 위의 제목 (순정 iOS 27 처럼 사진 위에 어두운 그라데이션 + 흰 큰 제목 + 날짜·개수)
     private let titleOverlay = LibraryTitleOverlay()
+    /// 보관함 아래 [년 | 월 | 전체] (끝까지 오므렸거나 년·월 보기일 때)
+    private let modeBar = LibraryModeBar()
+    private var moments: MomentsViewController?
+    private var momentsData: MomentsData?
+    private var momentsVersion = -1
     /// 처음 보일 때 최신 사진(맨 끝)으로 내려가야 하는지 (자리가 잡힌 뒤에)
     private var needsScrollToLatest = true
     /// 보관함의 필터 (순정 필터 메뉴처럼: 모든 항목 · 즐겨찾기 · 비디오)
@@ -704,7 +711,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     init(folder: Folder, isRoot: Bool = false) {
         self.folder = folder
         self.isRoot = isRoot
-        levels = isRoot ? [1, 3, 5, 7] : [1, 3, 5]
+        // 보관함은 순정처럼 끝까지 오므리면 아주 촘촘한 칸(그때 아래에 [년 | 월 | 전체])
+        levels = folder.id == "all" ? [1, 3, 5, 7, PhotoGridLayout.denseColumns] : (isRoot ? [1, 3, 5, 7] : [1, 3, 5])
         super.init(nibName: nil, bundle: nil)
         // 앨범 안에서도 순정처럼 아래 탭 막대를 그대로 둠 (닫히는 확대 전환 끝에서 화면이 덜컥이지 않게)
         var saved = isRoot ? Prefs.gridColumns : Prefs.albumGridColumns
@@ -762,6 +770,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         setContentScrollView(collectionView, for: [.top, .bottom])
         if isRoot {
             titleOverlay.title = folder.title
+            if folder.id == "all" {
+                modeBar.isHidden = true
+                modeBar.onMode = { [weak self] mode in self?.setLibraryMode(mode) }
+                modeBar.onLibrary = { [weak self] in self?.leaveDense() }
+                modeBar.onSearch = { [weak self] in self?.toast("검색은 준비 중이에요") }
+                view.addSubview(modeBar)
+            }
             view.addSubview(titleOverlay)
             // 위쪽은 우리 그라데이션이 맡음 (시스템 가장자리 효과가 겹치면 막대 아래로 딱딱한 선이 생김)
             if #available(iOS 26.0, *) {
@@ -796,6 +811,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         updateThumbSize()
         if isRoot {
             layoutTitleOverlay()
+            updateModeBar()
             if needsScrollToLatest, !list.isEmpty, view.bounds.height > 0 {
                 needsScrollToLatest = false
                 scrollToLatest()
@@ -806,6 +822,105 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     // MARK: - 보관함 위 제목 (순정 iOS 27)
 
     /// 위 막대 버튼 줄의 높이에 제목을 맞추고, 그 아래로 날짜·개수, 그 밑까지 어두운 그라데이션
+    // MARK: - 년 · 월 · 전체 (순정 iOS 27)
+
+    private var modeBarVisible: Bool {
+        folder.id == "all" && !selecting && (columns == PhotoGridLayout.denseColumns || (moments != nil))
+    }
+
+    private func updateModeBar() {
+        guard folder.id == "all", isViewLoaded else { return }
+        let show = modeBarVisible
+        if modeBar.isHidden == show {
+            modeBar.isHidden = !show
+            if #available(iOS 18.0, *) {
+                tabBarController?.setTabBarHidden(show, animated: true)
+            }
+        }
+        if show {
+            let height: CGFloat = 56
+            let bottom = view.bounds.height - max(view.safeAreaInsets.bottom, 20) - 4
+            modeBar.frame = CGRect(x: 16, y: bottom - height, width: view.bounds.width - 32, height: height)
+            view.bringSubviewToFront(modeBar)
+        }
+    }
+
+    private func setLibraryMode(_ mode: LibraryMode, month: Int? = nil) {
+        modeBar.mode = mode
+        if mode == .all {
+            moments?.willMove(toParent: nil)
+            moments?.view.removeFromSuperview()
+            moments?.removeFromParent()
+            moments = nil
+            titleOverlay.isHidden = false
+            navigationItem.rightBarButtonItems?.forEach { $0.isHidden = false }
+            updateModeBar()
+            return
+        }
+        let child: MomentsViewController
+        if let existing = moments {
+            child = existing
+        } else {
+            child = MomentsViewController(mode: mode)
+            child.onPickYear = { [weak self] month in self?.setLibraryMode(.months, month: month) }
+            child.onPickDay = { [weak self] id in self?.openDay(id) }
+            addChild(child)
+            child.view.frame = view.bounds
+            child.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.insertSubview(child.view, belowSubview: modeBar)
+            child.didMove(toParent: self)
+            moments = child
+        }
+        // 순정 년·월 보기에는 큰 제목·위 버튼이 없음
+        titleOverlay.isHidden = true
+        navigationItem.rightBarButtonItems?.forEach { $0.isHidden = true }
+        updateModeBar()
+        let version = list.version
+        if let data = momentsData, momentsVersion == version {
+            child.show(data, mode: mode, scrollToMonth: month)
+            return
+        }
+        let current = list
+        DispatchQueue.global(qos: .userInitiated).async {
+            let data = MomentsData.build(current.array())
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.momentsData = data
+                self.momentsVersion = version
+                if self.moments === child { child.show(data, mode: child === self.moments ? self.modeBar.mode : mode, scrollToMonth: month) }
+            }
+        }
+    }
+
+    /// 월 보기에서 날짜를 누름 → 전체 보기(3칸)에서 그날로
+    private func openDay(_ id: String) {
+        setLibraryMode(.all)
+        setColumnsDirectly(3)
+        reveal(assetID: id)
+        updateModeBar()
+    }
+
+    /// 아래 막대의 보관함 아이콘 → 보통 칸으로 돌아가고 탭 막대가 다시 보임
+    private func leaveDense() {
+        let anchor = collectionView.indexPathsForVisibleItems.sorted().dropFirst(collectionView.indexPathsForVisibleItems.count / 2).first
+            .map { list[flatIndex($0)].localIdentifier }
+        setLibraryMode(.all)
+        setColumnsDirectly(7)
+        if let anchor { reveal(assetID: anchor) }
+        updateModeBar()
+    }
+
+    private func setColumnsDirectly(_ value: Int) {
+        guard levels.contains(value), value != columns else { return }
+        finishPinchNow()
+        columns = value
+        gridLayout.columns = value
+        Prefs.gridColumns = value
+        updateThumbSize()
+        collectionView.reloadData()
+        collectionView.layoutIfNeeded()
+    }
+
     private func layoutTitleOverlay() {
         let barFrame = navigationController.map { view.convert($0.navigationBar.frame, from: $0.view) }
             ?? CGRect(x: 0, y: view.safeAreaInsets.top, width: view.bounds.width, height: 54)
@@ -836,7 +951,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let maxOffset = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
         let atLatest = latestAtBottom ? offset >= maxOffset - 8 : offset <= -inset.top + 8
         if atLatest {
-            return "항목 \(list.count.formatted())개"
+            return "\(list.count.formatted())개의 항목"
         }
         let probe = CGPoint(x: collectionView.bounds.midX, y: offset + inset.top + 4)
         let path = collectionView.indexPathForItem(at: probe)
@@ -1326,6 +1441,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             updateThumbSize()
             // 칸이 커졌으면 보이는 칸만 더 큰 썸네일로 (작아졌으면 지금 그림으로 충분)
             if grew { reloadVisibleThumbnails() }
+            updateModeBar()
         }
         if reloadPending && !transitioning {
             reloadPending = false
@@ -1666,7 +1782,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func configureHero(_ hero: HeroHeaderView) {
         let snapshot = Library.shared.snapshot
         hero.titleLabel.text = snapshot.nodes[folder.id]?.title ?? folder.title
-        hero.countLabel.text = "항목 \(list.count.formatted())개"
+        hero.countLabel.text = "\(list.count.formatted())개의 항목"
         hero.playButton.isHidden = list.isEmpty || selecting
         hero.onPlay = { [weak self] in self?.startSlideshow() }
         // 사진 앱 앨범은 그 앨범의 대표 사진, 아니면 가장 최근 사진 (앨범 카드와 같은 사진)
@@ -2173,7 +2289,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let header = UIDeferredMenuElement.uncached { [weak self] completion in
             guard let self else { completion([]); return }
             let title = Library.shared.snapshot.nodes[id]?.title ?? self.folder.title
-            let item = UIAction(title: title, subtitle: "항목 \(self.list.count.formatted())개",
+            let item = UIAction(title: title, subtitle: "\(self.list.count.formatted())개의 항목",
                                 image: self.albumMenuThumbnail(), handler: renameHandler)
             completion([item])
         }
