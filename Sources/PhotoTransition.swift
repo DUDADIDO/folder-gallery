@@ -161,7 +161,8 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         }
     }
 
-    /// 끈 거리(보기 화면 좌표의 이동량). 사진은 손가락을 따라 움직이며 줄고, 바탕·썸네일 줄은 거리만큼 사라짐
+    /// 끈 거리(보기 화면 좌표의 이동량). 사진은 손가락을 따라 움직이며 줄고, 바탕은 거리만큼 천천히,
+    /// 줄·배지·아래 막대·제목은 훨씬 빨리 (순정처럼 20pt 까지는 그대로, 80pt 에서 다 사라짐). 손가락을 되돌리면 다시 보임
     func update(translation move: CGPoint) {
         translation = move
         guard started, !ending, let context else { return }
@@ -178,7 +179,8 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
                            y: finger.y + (rect.minY - touchInContainer.y) * scale,
                            width: rect.width * scale, height: rect.height * scale)
         placeFlight(moved, cropped: false)
-        apply(progress: 1 - progress)
+        let chrome = 1 - min(1, max(0, (down - 20) / 60))
+        apply(backdrop: 1 - progress, chrome: chrome)
         context.updateInteractiveTransition(progress)
     }
 
@@ -273,9 +275,14 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
 
     /// progress 1: 보기 화면이 다 보임, 0: 격자만. 보기 화면 자신의 view 만 바꿈 (막대는 건드리지 않음)
     private func apply(progress: CGFloat) {
+        apply(backdrop: progress, chrome: progress)
+    }
+
+    /// 바탕과 줄·막대를 따로 (끌어 닫을 때). 버튼으로 열고 닫을 때는 apply(progress:) 로 같이
+    private func apply(backdrop: CGFloat, chrome: CGFloat) {
         guard let viewer else { return }
-        viewer.setTransitionAppearance(progress)
-        if flight == nil { viewer.view.alpha = progress }
+        viewer.setTransitionAppearance(backdrop: backdrop, chrome: chrome)
+        if flight == nil { viewer.view.alpha = backdrop }
     }
 
     /// 날아가는 사진을 rect 에. cropped 면 정사각형 썸네일처럼 가운데를 꽉 채워 자르고, 아니면 사진 전체
@@ -296,7 +303,8 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         if let viewer {
             viewer.setTransitionMediaHidden(false, placeholder: viewerShown ? flownImage : nil)
             viewer.view.alpha = 1
-            viewer.setTransitionAppearance(viewerShown ? 1 : 0)
+            let shown: CGFloat = viewerShown ? 1 : 0
+            viewer.setTransitionAppearance(backdrop: shown, chrome: shown)
         }
         if !completed && !opening {
             // 닫기를 취소함: 밑에 깔았던 격자를 치움

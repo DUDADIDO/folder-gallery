@@ -994,6 +994,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     private let titleTopLabel = UILabel()
     private let titleBottomLabel = UILabel()
+    /// 위 막대 가운데의 제목 알약 (줄·배지와 같이 옅어짐)
+    private let titlePill = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
+    /// 이 화면 자신의 아래 막대. 내비게이션의 아래 막대는 투명도를 바꿔도 보이는 게 안 바뀌어서
+    /// (끌어 닫는 동안 손가락을 따라 옅어지게 하려고) 이 화면에서는 쓰지 않음
+    private let bottomBar = UIToolbar()
 
     init(assets: [PHAsset], index: Int, sourceAlbumID: String?) {
         self.assets = assets
@@ -1042,9 +1047,9 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         dataSource = self
         delegate = self
 
-        // 아래 막대 (순정처럼): 공유 | 하트·정보·앨범에 추가 | 휴지통
+        // 아래 막대 (순정처럼): 공유 | 하트·정보·앨범에 추가 | 휴지통. 자리는 viewDidLayoutSubviews 에서
         let space = { UIBarButtonItem.flexibleSpace() }
-        toolbarItems = [shareItem, space(), favoriteItem, infoItem, albumItem, space(), deleteItem]
+        bottomBar.items = [shareItem, space(), favoriteItem, infoItem, albumItem, space(), deleteItem]
         // 오른쪽 위 ⋯
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeMoreMenu())
         setUpTitle()
@@ -1067,6 +1072,10 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         liveBadge.showsMenuAsPrimaryAction = true
         liveBadge.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(liveBadge)
+
+        view.addSubview(bottomBar)
+        // 첫 배치 전에도 대강 맞게 (정확한 높이는 layoutBottomBar 가 맞춤)
+        additionalSafeAreaInsets.bottom = 44
 
         // 썸네일 줄은 아래 막대 바로 위. 안전 영역(아래 막대 포함)에 붙여서 처음부터 제자리에
         let guide = view.safeAreaLayoutGuide
@@ -1093,7 +1102,10 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
                 // 아래로: 닫기 (모든 iOS 에서 우리 전환이 손가락을 따라감). 분명히 아래로 끌 때만
                 return self.allowsInteractiveDismiss(location: pan.location(in: self.view), velocity: velocity)
             }
-            // 위로: 정보 열기. 정보가 열려 있으면 사진 페이지 안의 스크롤이 맡음
+            // 위로: 정보 열기. 정보가 열려 있으면 사진 페이지 안의 스크롤이 맡음.
+            // 아래 막대 위에서 시작한 끌기는 막대의 것 (예전 내비게이션 막대는 이 화면 밖이었음)
+            let bar = self.bottomBar
+            if !bar.isHidden, bar.alpha > 0.01, bar.frame.contains(pan.location(in: self.view)) { return false }
             return !page.isZoomed && !self.infoShown
         }
         pan.delegate = panGate
@@ -1146,7 +1158,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         stack.alignment = .center
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let pill = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
+        let pill = titlePill
         pill.layer.cornerRadius = 22
         pill.layer.cornerCurve = .continuous
         pill.clipsToBounds = true
@@ -1194,7 +1206,10 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         navigationController?.setBackSwipe(blocked: .all, by: self)
         // 다른 화면에서 돌아올 때도 숨김 상태를 그대로
         navigationController?.setNavigationBarHidden(chromeHidden || infoShown, animated: animated)
-        navigationController?.setToolbarHidden(chromeHidden, animated: animated)
+        // 아래 막대는 이 화면 자신의 것(bottomBar). 내비게이션의 아래 막대는 숨긴 채로만 둠
+        if let navigation = navigationController, !navigation.isToolbarHidden {
+            navigation.setToolbarHidden(true, animated: false)
+        }
         // 보는 동안은 아래 탭 막대를 숨김 (선택 모드와 같은 방법. 닫다가 취소했을 때도 여기서 다시 숨김)
         if #available(iOS 18.0, *) {
             tabBarController?.setTabBarHidden(true, animated: animated)
@@ -1206,9 +1221,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         // 닫다가 취소했을 때도 다시 끔 (그사이 뒤 화면이 풀었을 수 있음)
         navigationController?.setBackSwipe(blocked: .all, by: self)
         // 막대가 어긋난 채로 남지 않게 (닫다가 취소한 뒤 등). 맞으면 건드리지 않음
-        if let navigation = navigationController, navigation.topViewController === self,
-           navigation.isToolbarHidden != chromeHidden {
-            navigation.setToolbarHidden(chromeHidden, animated: false)
+        if let navigation = navigationController, navigation.topViewController === self, !navigation.isToolbarHidden {
+            navigation.setToolbarHidden(true, animated: false)
         }
         if #available(iOS 18.0, *), let tabs = tabBarController, !tabs.isTabBarHidden {
             tabs.setTabBarHidden(true, animated: false)
@@ -1232,13 +1246,12 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         }
         guard isMovingFromParent else { return }
         navigationController?.setNavigationBarHidden(false, animated: animated)
-        navigationController?.setToolbarHidden(true, animated: animated)
-        // 격자로 닫는 우리 사진 전환이면 바탕·줄·배지는 전환이 서서히 지움
+        // 격자로 닫는 우리 사진 전환이면 바탕·줄·배지·아래 막대는 전환이 지움 (끌어 닫을 때는 손가락을 따라)
         if let coordinator = transitionCoordinator, !closesWithPhotoTransition(coordinator) {
             // 닫힐 때: 바탕이 사라지며 뒤의 화면이 보임
             coordinator.animate(alongsideTransition: { _ in
                 self.backdrop.alpha = 0
-                self.setChromeViewsAlpha(0)
+                self.setChromeViewsAlpha(fade: 0)
             }, completion: { context in
                 if context.isCancelled {
                     self.backdrop.alpha = 1
@@ -1259,6 +1272,29 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         super.viewSafeAreaInsetsDidChange()
         // 아래 막대가 나타나고 사라질 때 썸네일 줄이 바로 따라가게
         view.setNeedsLayout()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        layoutBottomBar()
+    }
+
+    /// 아래 막대를 내비게이션의 아래 막대가 있던 자리(홈 막대 바로 위)에 놓고,
+    /// 그 막대처럼 보이는 동안은 안전 영역 아래를 막대 높이만큼 올림 (썸네일 줄·영상 막대·사진 자리가 예전 그대로).
+    /// 막대 자리는 우리가 더한 만큼을 뺀 안전 영역으로 셈 (막대 자리 ↔ 더한 안전 영역이 서로 물고 돌지 않게)
+    private func layoutBottomBar() {
+        let bounds = view.bounds
+        guard bounds.width > 0 else { return }
+        let fitted = bottomBar.sizeThatFits(CGSize(width: bounds.width, height: 100)).height
+        let height = fitted > 1 ? fitted : 44
+        // 창의 안전 영역(홈 막대)을 씀: 탭 막대가 숨는 중이거나 우리가 더한 만큼이 아직 반영되기 전에도 흔들리지 않게
+        let systemBottom = view.window?.safeAreaInsets.bottom ?? max(0, view.safeAreaInsets.bottom - additionalSafeAreaInsets.bottom)
+        let frame = CGRect(x: 0, y: bounds.height - systemBottom - height, width: bounds.width, height: height)
+        if bottomBar.frame != frame { bottomBar.frame = frame }
+        let inset = chromeHidden ? 0 : height
+        if additionalSafeAreaInsets.bottom != inset {
+            additionalSafeAreaInsets.bottom = inset
+        }
     }
 
     private var currentIndex: Int? {
@@ -1287,7 +1323,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         // 속도를 알 수 없을 때(0)는 방향을 못 가리므로, 넘기는 중이 아니면 허용. 그 밖에는 분명히 아래로 끌 때만
         if velocity != .zero, !ZoomGesture.isDownward(velocity) { return false }
         // 썸네일 줄·영상 막대 위에서 시작한 끌기는 그 막대의 것
-        for bar in [scrubber, videoControls] as [UIView] where !bar.isHidden && bar.alpha > 0.01 {
+        for bar in [scrubber, videoControls, bottomBar] as [UIView] where !bar.isHidden && bar.alpha > 0.01 {
             if bar.frame.insetBy(dx: 0, dy: -8).contains(location) { return false }
         }
         return true
@@ -1329,11 +1365,13 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         currentPage?.setMediaHidden(hidden)
     }
 
-    /// 0: 바탕·썸네일 줄·배지가 다 투명 (뒤의 격자가 보임) ~ 1: 평소대로. 위·아래 막대는 viewWillAppear·viewWillDisappear 의 시스템 호출이 맡음
-    func setTransitionAppearance(_ progress: CGFloat) {
+    /// 0: 바탕·썸네일 줄·배지·아래 막대가 다 투명 (뒤의 격자가 보임) ~ 1: 평소대로.
+    /// 시스템 위 막대(뒤로·⋯)는 viewWillAppear·viewWillDisappear 의 시스템 호출이 맡음
+    /// backdrop 은 흰 바탕, chrome 은 줄·배지·아래 막대·제목 (끌어 닫을 때는 둘이 따로 — 막대가 훨씬 빨리 옅어짐)
+    func setTransitionAppearance(backdrop backdropProgress: CGFloat, chrome chromeProgress: CGFloat) {
         guard isViewLoaded else { return }
-        backdrop.alpha = progress
-        setChromeViewsAlpha(chromeAlpha * progress)
+        backdrop.alpha = backdropProgress
+        setChromeViewsAlpha(fade: chromeProgress)
     }
 
     private func makePage(_ index: Int) -> AssetPageViewController {
@@ -1486,10 +1524,34 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     // MARK: - 위아래 표시 숨기기
 
-    private func setChromeViewsAlpha(_ alpha: CGFloat) {
+    /// 줄·배지·영상 막대·아래 막대·제목 알약의 투명도. fade 는 지금 상태의 값에 곱하는 정도 (1 이 평소, 0 이 다 사라짐)
+    private func setChromeViewsAlpha(fade: CGFloat) {
+        let alpha = chromeAlpha * fade
         scrubber.alpha = alpha
         liveBadge.alpha = alpha
         videoControls.alpha = alpha
+        // 아래 막대와 제목은 정보를 열어도 그대로 (예전 내비게이션 막대처럼)
+        let bars = (chromeHidden ? 0 : 1) * fade
+        titlePill.alpha = bars
+        bottomBar.alpha = bars
+        syncBottomBarHidden(bars)
+    }
+
+    /// 유리 막대가 투명도를 안 따를 때를 대비해 거의 투명하면 숨김. 움직이는 중이면 끝난 뒤에 (사라지는 게 보이게)
+    private func syncBottomBarHidden(_ alpha: CGFloat) {
+        if alpha > 0.02 {
+            bottomBar.isHidden = false
+            return
+        }
+        let duration = UIView.inheritedAnimationDuration
+        guard duration > 0 else {
+            bottomBar.isHidden = true
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.05) { [weak self] in
+            guard let self, self.bottomBar.alpha <= 0.02 else { return }
+            self.bottomBar.isHidden = true
+        }
     }
 
     /// 지금 상태에서 줄·배지가 보일 정도 (숨김 0, 정보를 열수록 옅어짐)
@@ -1498,7 +1560,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     }
 
     private func applyChromeAlpha() {
-        setChromeViewsAlpha(chromeAlpha)
+        setChromeViewsAlpha(fade: 1)
     }
 
     /// 썸네일 줄에서 고른 사진으로 바로 바꿈
@@ -1522,10 +1584,12 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         guard chromeHidden != hidden else { return }
         chromeHidden = hidden
         navigationController?.setNavigationBarHidden(hidden, animated: animated)
-        navigationController?.setToolbarHidden(hidden, animated: animated)
         let changes = {
             self.backdrop.backgroundColor = self.chromeHidden ? .black : .systemBackground
             self.applyChromeAlpha()
+            // 아래 막대만큼 올려 둔 안전 영역도 같이 (썸네일 줄이 따라 내려가고 올라옴)
+            self.layoutBottomBar()
+            self.view.layoutIfNeeded()
         }
         if animated {
             UIView.animate(withDuration: 0.2, animations: changes)
@@ -1621,7 +1685,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
                 let scale = 1 - progress * 0.3
                 page.setDismissDrag(CGAffineTransform(translationX: move.x * 0.6, y: max(0, move.y)).scaledBy(x: scale, y: scale))
                 backdrop.alpha = 1 - progress
-                setChromeViewsAlpha(chromeHidden ? 0 : 1 - progress)
+                setChromeViewsAlpha(fade: 1 - progress)
             } else {
                 applyInfo(min(1, max(0, -move.y / infoDistance)), to: page)
             }

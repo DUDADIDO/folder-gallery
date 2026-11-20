@@ -216,7 +216,7 @@ final class HeroHeaderView: UICollectionReusableView {
 
 /// 사진 격자 배치. 칸 수(1·3·5·7)마다 자리를 한 번 계산해 두고 (묶음마다 맨 위 높이만 — 사진 수와 상관없이 빠름),
 /// 두 손가락으로 벌리고 오므리는 동안은 한 배치(칸 수)를 그대로 두고 사진 줄만 크게·작게 그림 (zoom).
-/// 사진은 제자리에서 커지고 작아질 뿐 다른 자리로 옮겨 가지 않음 — 배치가 바뀌는 건 격자 화면이 서서히 겹쳐 바꿈.
+/// 사진은 제자리에서 커지고 작아질 뿐 다른 자리로 옮겨 가지 않음 — 배치가 바뀌는 순간은 격자 화면이 짧게 겹쳐 바꿈.
 /// 1칸은 사진마다 원래 비율로 화면 너비를 꽉 채움. 묶음마다 맨 위에 머리글(날짜) 또는 정사각형 앨범 표지
 final class PhotoGridLayout: UICollectionViewLayout {
     /// 칸 크기를 바꾸는 중인 상태: columns 배치의 사진 줄(높이·사이)을 scale 배로. 머리글 높이는 그대로
@@ -227,8 +227,6 @@ final class PhotoGridLayout: UICollectionViewLayout {
         var scale: CGFloat
         /// 가로로 키우고 줄이는 중심 (격자 좌표의 x). 넘치는 칸은 화면 밖으로 잘림 (옆으로 스크롤하지 않음)
         var anchorX: CGFloat
-        /// 사진 칸(과 날짜 머리글)의 투명도. 앨범 표지는 늘 1
-        var itemAlpha: CGFloat
     }
 
     private struct Geometry {
@@ -518,7 +516,6 @@ final class PhotoGridLayout: UICollectionViewLayout {
         let attributes = UICollectionViewLayoutAttributes(forCellWith: path)
         if let zoom {
             attributes.frame = zoomedItemFrame(section: path.section, item: path.item, geometry, zoom)
-            attributes.alpha = zoom.itemAlpha
         } else {
             attributes.frame = itemFrame(section: path.section, item: path.item, geometry)
         }
@@ -529,10 +526,9 @@ final class PhotoGridLayout: UICollectionViewLayout {
         let attributes = UICollectionViewLayoutAttributes(forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
                                                           with: IndexPath(item: 0, section: section))
         if let zoom {
-            // 머리글은 높이 그대로 사진 줄 바로 위에 붙어 감. 앨범 표지는 흐려지지 않고, 날짜 머리글은 사진과 같이
+            // 머리글은 높이 그대로 사진 줄 바로 위에 붙어 감
             attributes.frame = CGRect(x: geometry.x, y: zoomedTop(section, geometry, zoom.scale),
                                       width: geometry.width, height: geometry.header)
-            if headerHeight != nil { attributes.alpha = zoom.itemAlpha }
         } else {
             attributes.frame = headerFrame(section: section, geometry)
         }
@@ -605,18 +601,21 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         var fingerY: CGFloat
         /// 손가락 사이의 가로 위치 (격자 좌표). 칸이 이 점을 중심으로 옆으로 커지고 작아짐
         var fingerX: CGFloat
+        /// 지금 격자가 그리는 배치 (levels 안의 차례. base 아니면 target). 늘 한 배치만 또렷하게
+        var shown: Int
     }
     private var pinch: PinchState?
-    /// 칸 크기를 바꾸는 동안 떠나는 배치(기준 칸 수)의 그림. 손가락을 따라 커지고 작아지며 서서히 사라짐.
-    /// clip 은 격자 위에 놓이고 앨범 표지 아래부터만 보이게 자름. rect 는 그림을 뜬 자리 (그 배치의 격자 좌표, 원래 크기)
-    private struct PinchGhost {
+    /// 배치가 바뀌는 순간 떠 둔 바로 전 화면. 바뀐 격자 위에서 짧게 사라짐 (손가락을 따라 커지고 작아지며).
+    /// clip 은 격자 위에 놓이고 앨범 표지 아래부터만 보이게 자름.
+    /// rect·finger 는 뜰 때의 자리와 손가락 (이 화면 좌표), side 는 그때의 칸 한 변
+    private struct PinchFade {
         let clip: UIView
         let image: UIView
         let rect: CGRect
+        let finger: CGPoint
+        let side: CGFloat
     }
-    private var ghost: PinchGhost?
-    /// ghost 를 떠 둔 기준 칸 수 (levels 안의 차례). 뜰 것이 없었어도 기록해서 매번 다시 뜨지 않게
-    private var ghostBase: Int?
+    private var pinchFade: PinchFade?
     /// 손을 뗀 뒤 가까운 칸 수로 자리 잡는 움직임
     private var settleLink: CADisplayLink?
     private var settle: (from: CGFloat, to: CGFloat, start: CFTimeInterval, duration: CFTimeInterval)?
@@ -943,7 +942,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let fraction = frame.height > 0 ? min(1, max(0, (point.y - frame.minY) / frame.height)) : 0.5
         pinch = PinchState(base: base, startScale: max(0.01, gesture.scale), target: nil, progress: 0,
                            anchor: anchor, anchorFraction: fraction,
-                           fingerY: point.y - collectionView.contentOffset.y, fingerX: point.x)
+                           fingerY: point.y - collectionView.contentOffset.y, fingerX: point.x, shown: base)
         applyPinch()
     }
 
@@ -989,74 +988,48 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             state.progress = min(1, max(0, progress))
             break
         }
+        // 그리는 배치: 가는 칸 수로는 0.3 을 넘으면, 기준으로는 0.2 밑으로 내려가면 바꿈 (그 사이에서 깜빡이지 않게)
+        var shown = state.shown
+        if let target = state.target {
+            if state.shown == target {
+                if state.progress < 0.2 { shown = state.base }
+            } else if state.shown == state.base {
+                if state.progress > 0.3 { shown = target }
+            } else {
+                // 한 번에 여러 단계를 넘어감 등: 가까운 쪽으로
+                shown = state.progress > 0.3 ? target : state.base
+            }
+        } else {
+            shown = state.base
+        }
+        if shown != state.shown { switchShown(to: shown, &state) }
         pinch = state
         applyPinch()
     }
 
-    private func levelSide(_ index: Int) -> CGFloat {
-        max(1, gridLayout.side(columns: levels[index]))
-    }
-
-    /// 지금 상태를 격자에 반영 (순정처럼):
-    /// 칸 한 변은 기준 칸 수와 가는 칸 수 사이를 progress 만큼. 배치는 그대로 두고 크기만 바뀜 (넘치면 화면 옆으로 잘리고, 작으면 옆이 빔).
-    /// 배치가 바뀌는 건 겹쳐 바꾸기: 격자는 가는 칸 수의 배치를 같은 크기로 그리며 서서히 나타나고,
-    /// 그 위에 떠 둔 기준 칸 수의 그림(ghost)이 같은 크기로 커지고 작아지며 서서히 사라짐. 사진이 다른 자리로 옮겨 가지 않음
-    private func applyPinch() {
-        guard let state = pinch else { return }
-        let base = levels[state.base]
-        if ghostBase != state.base { makeGhost(state) }
-        guard let targetIndex = state.target else {
-            // 더 갈 칸 수가 없음: 기준 배치 그대로 (크기도 그대로)
-            gridLayout.zoom = PhotoGridLayout.Zoom(columns: base, scale: 1, anchorX: state.fingerX, itemAlpha: 1)
-            setPinchOffset(anchoredOffset(columns: base, scale: 1, state))
-            ghost?.clip.alpha = 0
-            return
-        }
-        let target = levels[targetIndex]
+    /// 지금 칸 한 변: 기준 칸 수와 가는 칸 수 사이를 progress 만큼 (가는 칸 수가 없으면 기준 그대로)
+    private func pinchSide(_ state: PinchState) -> CGFloat {
+        let baseSide = levelSide(state.base)
+        guard let target = state.target else { return baseSide }
         let progress = min(1, max(0, state.progress))
-        let baseSide = levelSide(state.base), targetSide = levelSide(targetIndex)
-        let side = baseSide + (targetSide - baseSide) * progress
-        let baseScale = side / baseSide
-        let targetScale = side / targetSide
-        // 가는 배치는 0.3 ~ 0.65 사이에 나타나고, 떠나는 그림은 0.4 ~ 0.8 사이에 사라짐 (몇 프레임 겹쳐 보임).
-        // 그림을 못 떴으면(보이는 사진이 없었음) 가는 배치를 그냥 보임
-        let fadeIn = ghost == nil ? 1 : min(1, max(0, (progress - 0.3) / 0.35))
-        let fadeOut = 1 - min(1, max(0, (progress - 0.4) / 0.4))
-        // 스크롤 위치(= 앨범 표지 자리)는 나타나는 만큼 떠나는 배치 기준에서 가는 배치 기준으로 옮겨 감.
-        // 처음 순간 표지가 덜컥 움직이지 않게 (표지는 흐려지지 않으므로)
-        let follow = fadeIn * fadeIn * (3 - 2 * fadeIn)
-        let baseOffset = anchoredOffset(columns: base, scale: baseScale, state)
-        let targetOffset = anchoredOffset(columns: target, scale: targetScale, state)
-        gridLayout.zoom = PhotoGridLayout.Zoom(columns: target, scale: targetScale, anchorX: state.fingerX, itemAlpha: fadeIn)
-        setPinchOffset(baseOffset + (targetOffset - baseOffset) * follow)
-        placeGhost(state, scale: baseScale, offset: baseOffset, alpha: fadeOut)
+        return baseSide + (levelSide(target) - baseSide) * progress
     }
 
-    private func setPinchOffset(_ y: CGFloat) {
-        collectionView.contentOffset = CGPoint(x: collectionView.contentOffset.x, y: y)
-        collectionView.layoutIfNeeded()
-    }
-
-    /// 지금 기준 칸 수의 배치를 원래 크기로 그림으로 떠 둠 (손가락이 닿을 때, 그리고 한 번에 다음 단계로 넘어갈 때).
-    /// 앨범 표지는 빼고 그 아래 격자만
-    private func makeGhost(_ state: PinchState) {
-        removeGhost()
-        ghostBase = state.base
-        let columns = levels[state.base]
-        var afterUpdates = false
-        if gridLayout.zoom != nil || gridLayout.columns != columns {
-            // 다음 단계로 넘어감: 새 기준 배치를 원래 크기로 그려 놓고 뜸 (이 프레임 안에서 바로 원래 상태로 돌아감)
-            gridLayout.zoom = PhotoGridLayout.Zoom(columns: columns, scale: 1, anchorX: state.fingerX, itemAlpha: 1)
-            setPinchOffset(anchoredOffset(columns: columns, scale: 1, state))
-            afterUpdates = true
+    /// 그리는 배치를 바꿈: 바꾸기 바로 전 화면을 떠서 위에 얹고 짧게 사라지게 함 (순정처럼 0.2초 남짓, 손가락과 상관없이)
+    private func switchShown(to index: Int, _ state: inout PinchState) {
+        removePinchFade()
+        let frame = collectionView.frame
+        var top = frame.minY
+        if let cover = gridLayout.coverHeight {
+            top = max(top, frame.minY + cover - collectionView.contentOffset.y)
         }
-        let visible = collectionView.bounds
-        var top = visible.minY
-        if let cover = gridLayout.coverHeight { top = max(top, cover) }
-        let rect = CGRect(x: visible.minX, y: top, width: visible.width, height: visible.maxY - top)
+        let rect = CGRect(x: frame.minX, y: top, width: frame.width, height: frame.maxY - top)
+        let finger = CGPoint(x: frame.minX + state.fingerX - collectionView.contentOffset.x, y: frame.minY + state.fingerY)
+        let side = pinchSide(state)
+        state.shown = index
+        // 이 화면에서 뜸 (바탕까지 함께라 그림이 불투명함). 아직 그려지지 않은 바뀐 배치가 아니라 지금 보이는 화면
         guard rect.width > 1, rect.height > 1,
-              let image = collectionView.resizableSnapshotView(from: rect, afterScreenUpdates: afterUpdates,
-                                                               withCapInsets: .zero) else { return }
+              let image = view.resizableSnapshotView(from: rect, afterScreenUpdates: false, withCapInsets: .zero) else { return }
         let clip = UIView()
         clip.clipsToBounds = true
         clip.isUserInteractionEnabled = false
@@ -1064,42 +1037,60 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         image.isUserInteractionEnabled = false
         clip.addSubview(image)
         view.insertSubview(clip, aboveSubview: collectionView)
-        ghost = PinchGhost(clip: clip, image: image, rect: rect)
+        let fade = PinchFade(clip: clip, image: image, rect: rect, finger: finger, side: side)
+        pinchFade = fade
+        placePinchFade(fade, state)
+        UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut], animations: {
+            clip.alpha = 0
+        }, completion: { [weak self] _ in
+            clip.removeFromSuperview()
+            if self?.pinchFade?.clip === clip { self?.pinchFade = nil }
+        })
     }
 
-    /// 떠 둔 그림을 기준 배치가 scale 배일 때의 자리에 (손가락 아래 사진의 그 점이 손가락 아래에). offset 은 그때의 스크롤 위치
-    private func placeGhost(_ state: PinchState, scale: CGFloat, offset: CGFloat, alpha: CGFloat) {
-        guard let ghost, let base = ghostBase else { return }
-        let columns = levels[base]
-        guard let original = gridLayout.itemFrame(state.anchor, columns: columns, scale: 1),
-              let zoomed = gridLayout.itemFrame(state.anchor, columns: columns, scale: scale) else {
-            ghost.clip.alpha = 0
-            return
-        }
-        // 손가락 아래 점: 그림 안(격자 좌표, 원래 크기)과 지금 화면(격자 화면 위쪽 기준)
-        let anchorY = original.minY + original.height * state.anchorFraction
-        let screenAnchorY = zoomed.minY + zoomed.height * state.anchorFraction - offset
-        let source = ghost.rect
-        let minX = state.fingerX + (source.minX - state.fingerX) * scale - collectionView.contentOffset.x
-        let minY = screenAnchorY + (source.minY - anchorY) * scale
-        // 자르는 판: 격자 화면에서 지금 앨범 표지 아래부터 (표지를 덮지 않게)
+    private func levelSide(_ index: Int) -> CGFloat {
+        max(1, gridLayout.side(columns: levels[index]))
+    }
+
+    /// 지금 상태를 격자에 반영 (순정처럼): 격자는 늘 한 배치(shown)만 또렷하게 그리고,
+    /// 칸 한 변은 기준 칸 수와 가는 칸 수 사이를 progress 만큼 (넘치면 화면 옆으로 잘리고, 작으면 옆이 빔).
+    /// 손가락 아래 사진은 손가락 아래에 그대로. 배치가 바뀌는 순간만 switchShown 이 짧게 겹쳐 바꿈
+    private func applyPinch() {
+        guard let state = pinch else { return }
+        let shown = levels.indices.contains(state.shown) ? state.shown : state.base
+        let columns = levels[shown]
+        let scale = pinchSide(state) / levelSide(shown)
+        gridLayout.zoom = PhotoGridLayout.Zoom(columns: columns, scale: scale, anchorX: state.fingerX)
+        setPinchOffset(anchoredOffset(columns: columns, scale: scale, state))
+        if let fade = pinchFade { placePinchFade(fade, state) }
+    }
+
+    private func setPinchOffset(_ y: CGFloat) {
+        collectionView.contentOffset = CGPoint(x: collectionView.contentOffset.x, y: y)
+        collectionView.layoutIfNeeded()
+    }
+
+    /// 사라지는 중인 전 화면을 손가락을 따라 (뜰 때의 손가락 자리를 중심으로, 그때보다 칸이 커진 만큼) 옮김.
+    /// 자르는 판은 지금 앨범 표지 아래부터 (표지를 덮지 않게)
+    private func placePinchFade(_ fade: PinchFade, _ state: PinchState) {
         let frame = collectionView.frame
         var clipTop = frame.minY
         if let cover = gridLayout.coverHeight {
             clipTop = max(clipTop, frame.minY + cover - collectionView.contentOffset.y)
         }
         clipTop = min(clipTop, frame.maxY)
-        ghost.clip.frame = CGRect(x: frame.minX, y: clipTop, width: frame.width, height: frame.maxY - clipTop)
-        ghost.image.transform = CGAffineTransform(scaleX: scale, y: scale)
-        ghost.image.center = CGPoint(x: minX + source.width * scale / 2,
-                                     y: frame.minY + minY + source.height * scale / 2 - clipTop)
-        ghost.clip.alpha = alpha
+        fade.clip.frame = CGRect(x: frame.minX, y: clipTop, width: frame.width, height: frame.maxY - clipTop)
+        let scale = pinchSide(state) / max(1, fade.side)
+        let finger = CGPoint(x: frame.minX + state.fingerX - collectionView.contentOffset.x, y: frame.minY + state.fingerY)
+        let center = CGPoint(x: finger.x + (fade.rect.midX - fade.finger.x) * scale,
+                             y: finger.y + (fade.rect.midY - fade.finger.y) * scale)
+        fade.image.transform = CGAffineTransform(scaleX: scale, y: scale)
+        fade.image.center = CGPoint(x: center.x - frame.minX, y: center.y - clipTop)
     }
 
-    private func removeGhost() {
-        ghost?.clip.removeFromSuperview()
-        ghost = nil
-        ghostBase = nil
+    private func removePinchFade() {
+        pinchFade?.clip.removeFromSuperview()
+        pinchFade = nil
     }
 
     /// 그 칸 수의 사진 줄이 scale 배일 때 손가락 아래 사진의 같은 점이 손가락 아래에 오는 스크롤 위치 (내용 끝을 넘지 않게)
@@ -1117,18 +1108,23 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     private func endPinch(velocity: CGFloat, cancelled: Bool) {
         collectionView.panGestureRecognizer.isEnabled = true
-        guard let state = pinch, settleLink == nil else { return }
+        guard var state = pinch, settleLink == nil else { return }
         guard let target = state.target else {
             commitPinch(toTarget: false)
             return
         }
-        // 놓을 때의 빠르기까지 셈: 조금 더 갔을 자리가 절반을 넘으면 그 칸 수로
-        var finish = state.progress > 0.5
-        if !cancelled {
+        // 지금 그리는 배치로 마침. 아직 기준 배치인데 빠르게 벌리거나 오므리며 놓았으면(조금 더 갔을 자리가 0.3 을 넘음)
+        // 가는 배치로 바꾸고(짧게 겹쳐) 그쪽으로
+        if !cancelled, state.shown != target {
             let ratio = levelSide(target) / levelSide(state.base)
             let speed = abs(ratio - 1) > 0.001 ? velocity / state.startScale / (ratio - 1) : 0   // 초당 진행
-            finish = state.progress + speed * 0.15 > 0.5
+            if state.progress + speed * 0.15 > 0.3 {
+                switchShown(to: target, &state)
+                pinch = state
+                applyPinch()
+            }
         }
+        let finish = state.shown == target
         let goal: CGFloat = finish ? 1 : 0
         let distance = abs(goal - state.progress)
         guard distance > 0.001 else {
@@ -1161,7 +1157,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         settleLink = nil
         settle = nil
         // 떠 둔 그림은 어떻게 끝나든 치움
-        removeGhost()
+        removePinchFade()
         guard let state = pinch else { return }
         pinch = nil
         let index = (toTarget ? state.target : nil) ?? state.base
@@ -1197,10 +1193,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             settleLink?.invalidate()
             settleLink = nil
             settle = nil
-            removeGhost()
+            removePinchFade()
             return
         }
-        let toTarget = settle.map { $0.to >= 1 } ?? (state.progress > 0.5)
+        // 자리 잡는 중이면 그 끝으로, 아니면 지금 그리는 배치로
+        let toTarget = settle.map { $0.to >= 1 } ?? (state.target != nil && state.shown == state.target)
         commitPinch(toTarget: toTarget)
     }
 
