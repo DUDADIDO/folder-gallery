@@ -933,7 +933,8 @@ final class InfoPanelView: UIView {
         })
 
         // 5) 들어 있는 앨범 (이 앱에서 더한 것. 맨 끝)
-        if albumNames == nil {
+        // 켤 때의 임시 목록에는 앨범의 사진 목록이 없어서 그때는 정하지 않음
+        if albumNames == nil, !Library.shared.snapshot.partial {
             let snapshot = Library.shared.snapshot
             let id = asset.localIdentifier
             var names: [String] = []
@@ -945,7 +946,12 @@ final class InfoPanelView: UIView {
             albumNames = names
         }
         let albums = albumNames ?? []
-        let albumText = albums.isEmpty ? "앨범 없음 (미분류)" : "앨범  " + albums.joined(separator: ", ")
+        let albumText: String
+        if albumNames == nil {
+            albumText = "앨범 확인 중"
+        } else {
+            albumText = albums.isEmpty ? "앨범 없음 (미분류)" : "앨범  " + albums.joined(separator: ", ")
+        }
         stack.addArrangedSubview(singleRowCard(label(albumText, color: albums.isEmpty ? .secondaryLabel : .label), action: nil))
 
         onContentChange?()

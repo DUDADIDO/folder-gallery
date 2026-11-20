@@ -131,6 +131,11 @@ final class AlbumCell: UICollectionViewCell {
     }
 
     /// covers: 앨범이면 대표 사진 1장, 폴더면 안의 앨범 대표 사진 최대 4장
+    /// 장수 글자만 바꿈 (표지는 그대로)
+    func setCountText(_ text: String) {
+        if countLabel.text != text { countLabel.text = text }
+    }
+
     func configure(title: String, countText: String, isFolder: Bool, covers: [PHAsset], thumbSize: CGSize) {
         cancelRequests()
         self.isFolder = isFolder
@@ -656,6 +661,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         if folder.isGroup {
             return String(snapshot.children[folder.id]?.count ?? 0)
         }
+        // 켤 때의 임시 목록에는 사진 목록이 없어서 장수는 전체 목록이 온 뒤에 (틀린 숫자를 보이지 않게)
+        if snapshot.partial { return "" }
         return String(snapshot.items[folder.id]?.count ?? 0)
     }
 
@@ -678,7 +685,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
 
         if case .folder(let id) = mode, snapshot.loaded {
             guard let node = snapshot.nodes[id] else {
-                // 폴더가 없어짐
+                // 폴더가 없어짐 (켤 때의 임시 목록으로는 판단하지 않음)
+                if snapshot.partial { return }
                 if navigationController?.topViewController === self {
                     navigationController?.popViewController(animated: true)
                 }
@@ -745,6 +753,13 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
             if let header = collectionView.supplementaryView(forElementKind: kind, at: indexPath) as? SectionHeaderView {
                 configure(header, section: indexPath.section)
             }
+        }
+        // 장수만 바꿈 (표지는 다시 받지 않음. 임시 목록에서 전체 목록으로 바뀔 때 숫자가 나타나게)
+        let snapshot = Library.shared.snapshot
+        for indexPath in collectionView.indexPathsForVisibleItems {
+            guard let folder = folder(at: indexPath),
+                  let cell = collectionView.cellForItem(at: indexPath) as? AlbumCell else { continue }
+            cell.setCountText(countText(folder, snapshot))
         }
     }
 

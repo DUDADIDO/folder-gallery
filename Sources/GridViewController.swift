@@ -1223,14 +1223,17 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func reloadFromLibrary(force: Bool) {
         finishPinchNow()
         let snapshot = Library.shared.snapshot
-        if snapshot.loaded && !snapshot.folders.contains(where: { $0.id == folder.id }) && folder.isUser {
+        // 임시 목록(켤 때 먼저 보여 주는 것)으로는 지워졌는지 판단하지 않음
+        let isFinal = snapshot.loaded && !snapshot.partial
+        if isFinal && !snapshot.folders.contains(where: { $0.id == folder.id }) && folder.isUser {
             // 폴더가 지워짐
             if navigationController?.topViewController === self {
                 navigationController?.popViewController(animated: true)
             }
             return
         }
-        var new = snapshot.items[folder.id] ?? []
+        // 임시 목록에는 사진 목록이 없거나 표지 한 장뿐이라 전체 목록이 올 때까지 비워 둠
+        var new = snapshot.partial ? [] : (snapshot.items[folder.id] ?? [])
         // 앨범 안은 순정처럼 오래된 항목 순이 기본
         if !newestFirst { new.reverse() }
         let newIDs = new.map(\.localIdentifier)
@@ -1251,7 +1254,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             collectionView.backgroundView = emptyLabel
         } else {
             emptyLabel.text = "사진이 없어요"
-            collectionView.backgroundView = (assets.isEmpty && snapshot.loaded) ? emptyLabel : nil
+            collectionView.backgroundView = (assets.isEmpty && isFinal) ? emptyLabel : nil
         }
 
         if selecting && !keep.isEmpty {

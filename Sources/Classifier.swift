@@ -118,20 +118,31 @@ final class Classifier {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         url = dir.appendingPathComponent("classify-v1.json")
+        // 저장해 둔 분류는 처음 쓸 때 읽음 (보통 work 줄의 전체 목록 만들기. 켤 때 메인 줄을 막지 않게)
+        _ = ImportProbe.usable
+    }
+
+    /// 저장해 둔 분류를 아직 안 읽었으면 읽음. lock 을 잡은 채로만 부름
+    private var cacheLoaded = false
+    private func loadCacheIfNeeded() {
+        guard !cacheLoaded else { return }
+        cacheLoaded = true
         if let data = try? Data(contentsOf: url),
            let saved = try? JSONDecoder().decode([String: Entry].self, from: data) {
-            cache = saved
+            // 읽기 전에 들어온 것이 있으면 그쪽이 새것
+            cache = saved.merging(cache) { _, new in new }
         }
-        _ = ImportProbe.usable
     }
 
     func snapshotCache() -> [String: Entry] {
         lock.lock(); defer { lock.unlock() }
+        loadCacheIfNeeded()
         return cache
     }
 
     func entry(for id: String) -> Entry? {
         lock.lock(); defer { lock.unlock() }
+        loadCacheIfNeeded()
         return cache[id]
     }
 
@@ -142,6 +153,7 @@ final class Classifier {
 
     func enqueue(_ assets: [PHAsset]) {
         lock.lock()
+        loadCacheIfNeeded()
         // 이미 분류했거나 줄 서 있는 건 뺌
         let fresh = assets.filter { cache[$0.localIdentifier] == nil && queued.insert($0.localIdentifier).inserted }
         lock.unlock()
@@ -152,6 +164,8 @@ final class Classifier {
     /// 전부 다시 분류
     func reset() {
         lock.lock()
+        // 다 지우므로 저장해 둔 것은 더 읽지 않음
+        cacheLoaded = true
         cache = [:]
         stats = [:]
         lock.unlock()
@@ -169,6 +183,7 @@ final class Classifier {
             autoreleasepool {
                 let entry = classify(asset)
                 lock.lock()
+                loadCacheIfNeeded()
                 cache[asset.localIdentifier] = entry
                 queued.remove(asset.localIdentifier)
                 lock.unlock()
@@ -186,7 +201,8 @@ final class Classifier {
     }
 
     private func save() {
-        lock.lock(); let copy = cache; lock.unlock()
+        // 안 읽은 채로 저장하면 저장해 둔 것을 빈 것으로 덮으므로 먼저 읽음
+        lock.lock(); loadCacheIfNeeded(); let copy = cache; lock.unlock()
         if let data = try? JSONEncoder().encode(copy) {
             try? data.write(to: url, options: .atomic)
         }

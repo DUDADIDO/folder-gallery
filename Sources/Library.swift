@@ -37,6 +37,9 @@ struct Snapshot {
     var pending = 0
     var total = 0
     var loaded = false
+    /// 켤 때 먼저 보여 주는 임시 목록인지 (앨범 구조·표지만. 사진 목록은 비었거나 표지 한 장뿐이라
+    /// 비었다·없어졌다·몇 장이다를 여기서 판단하면 안 됨). 곧 전체 목록으로 바뀜
+    var partial = false
 
     static let top = "top"
 
@@ -109,7 +112,18 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         classifier.onProgress = { [weak self] in
             DispatchQueue.main.async { self?.scheduleRebuild() }
         }
-        scheduleRebuild()
+        // 처음 한 번은 기다리지 않음: 앨범 구조·표지만으로 된 임시 목록을 바로 보여 주고, 이어서 전체 목록을 만듦
+        let hide = hideMoved
+        work.async {
+            let quick = self.quickBuild()
+            DispatchQueue.main.async {
+                // 전체 목록이 이미 들어왔으면 임시 목록으로 덮지 않음
+                guard !self.snapshot.loaded else { return }
+                self.snapshot = quick
+                NotificationCenter.default.post(name: Library.didChange, object: nil)
+            }
+            self.rebuildNow(hideMoved: hide)
+        }
     }
 
     func photoLibraryDidChange(_ changeInstance: PHChange) {
@@ -123,28 +137,25 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
             self.rebuildScheduled = false
             let hide = self.hideMoved
             self.work.async {
-                let (snap, pending) = self.build(hideMoved: hide)
-                DispatchQueue.main.async {
-                    self.snapshot = snap
-                    NotificationCenter.default.post(name: Library.didChange, object: nil)
-                }
-                self.classifier.enqueue(pending)
+                self.rebuildNow(hideMoved: hide)
             }
         }
     }
 
-    private func build(hideMoved: Bool) -> (Snapshot, [PHAsset]) {
-        let newestFirst = PHFetchOptions()
-        newestFirst.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+    /// 전체 목록을 만들어 바꿔 넣음 (work 줄에서만)
+    private func rebuildNow(hideMoved hide: Bool) {
+        let (snap, pending) = build(hideMoved: hide)
+        saveAutoSummary(snap)
+        DispatchQueue.main.async {
+            self.snapshot = snap
+            NotificationCenter.default.post(name: Library.didChange, object: nil)
+        }
+        classifier.enqueue(pending)
+    }
 
-        let fetched = PHAsset.fetchAssets(with: newestFirst)
-        var all: [PHAsset] = []
-        all.reserveCapacity(fetched.count)
-        fetched.enumerateObjects { asset, _, _ in all.append(asset) }
-
-        var items: [String: [PHAsset]] = [:]
-
-        // 사진 앱의 앨범·폴더 구조를 그대로 읽음 (사진 앱에서 묶어 둔 폴더가 그대로 폴더)
+    /// 사진 앱의 앨범·폴더 구조 (사진 수와 상관없이 빠름)
+    private func readStructure() -> (children: [String: [String]], nodes: [String: Folder],
+                                     albums: [(id: String, album: PHAssetCollection)]) {
         var children: [String: [String]] = [:]
         var nodes: [String: Folder] = [:]
         var albumObjects: [(id: String, album: PHAssetCollection)] = []
@@ -169,6 +180,107 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
             }
             children[container] = ids
         }
+        return (children, nodes, albumObjects)
+    }
+
+    /// 켤 때 바로 보여 줄 임시 목록 (work 줄에서만): 사진 앱 앨범 구조와 표지, 그리고 지난번 전체 목록에서
+    /// 저장해 둔 자동 분류 앨범(이름·표지). 보관함 전체를 훑지 않아서 사진 수와 상관없이 빠름.
+    /// 사진 앱 앨범은 사진 목록이 아직 없고, 자동 분류 앨범은 표지 한 장만 들어 있음
+    private func quickBuild() -> Snapshot {
+        let (children, nodes, albumObjects) = readStructure()
+        let newestOne = PHFetchOptions()
+        newestOne.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        newestOne.fetchLimit = 1
+
+        var covers: [String: PHAsset] = [:]
+        var userFolders: [Folder] = []
+        for (id, album) in albumObjects {
+            // 사진 앱의 대표 사진. 없으면 가장 최근 사진 (전체 목록에서 표지로 쓰는 것과 같은 사진)
+            let keyAssets: PHFetchResult<PHAsset>? = PHAsset.fetchKeyAssets(in: album, options: nil)
+            if let key = keyAssets?.firstObject {
+                covers[id] = key
+            } else if let newest = PHAsset.fetchAssets(in: album, options: newestOne).firstObject {
+                covers[id] = newest
+            }
+            if let node = nodes[id] { userFolders.append(node) }
+        }
+        userFolders.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+
+        var folders: [Folder] = []
+        var items: [String: [PHAsset]] = [:]
+        let summary = loadAutoSummary()
+        let coverIDs = summary.compactMap { $0.cover }
+        var found: [String: PHAsset] = [:]
+        if !coverIDs.isEmpty {
+            PHAsset.fetchAssets(withLocalIdentifiers: coverIDs, options: nil).enumerateObjects { asset, _, _ in
+                found[asset.localIdentifier] = asset
+            }
+        }
+        for entry in summary {
+            guard let section = Folder.Section(rawValue: entry.section), section != .user else { continue }
+            if let coverID = entry.cover {
+                // 표지 사진이 없어졌으면 그 앨범은 전체 목록이 올 때까지 뺌
+                guard let asset = found[coverID] else { continue }
+                items[entry.id] = [asset]
+            } else {
+                items[entry.id] = []
+            }
+            folders.append(Folder(id: entry.id, title: entry.title, symbol: entry.symbol, section: section))
+        }
+        folders.append(contentsOf: userFolders)
+        return Snapshot(folders: folders, items: items, children: children, nodes: nodes, covers: covers,
+                        pending: 0, total: 0, loaded: true, partial: true)
+    }
+
+    // MARK: - 자동 분류 앨범 요약 (다음 실행 때 임시 목록에 씀. 앨범 ID·이름·기호·구역·표지 사진 ID 만)
+
+    private struct AutoSummary: Codable, Equatable {
+        let id: String
+        let title: String
+        let symbol: String
+        let section: Int
+        let cover: String?
+    }
+
+    private static let summaryURL: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("auto-folders-v1.json")
+    }()
+
+    /// 마지막으로 저장한 요약 (work 줄에서만). 같으면 다시 쓰지 않음
+    private var savedSummary: [AutoSummary]?
+
+    private func loadAutoSummary() -> [AutoSummary] {
+        guard let data = try? Data(contentsOf: Library.summaryURL),
+              let list = try? JSONDecoder().decode([AutoSummary].self, from: data) else { return [] }
+        savedSummary = list
+        return list
+    }
+
+    private func saveAutoSummary(_ snap: Snapshot) {
+        let list = snap.autoFolders.map { folder in
+            AutoSummary(id: folder.id, title: folder.title, symbol: folder.symbol, section: folder.section.rawValue,
+                        cover: snap.items[folder.id]?.first?.localIdentifier)
+        }
+        guard list != savedSummary, let data = try? JSONEncoder().encode(list) else { return }
+        try? data.write(to: Library.summaryURL, options: .atomic)
+        savedSummary = list
+    }
+
+    private func build(hideMoved: Bool) -> (Snapshot, [PHAsset]) {
+        let newestFirst = PHFetchOptions()
+        newestFirst.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+
+        let fetched = PHAsset.fetchAssets(with: newestFirst)
+        var all: [PHAsset] = []
+        all.reserveCapacity(fetched.count)
+        fetched.enumerateObjects { asset, _, _ in all.append(asset) }
+
+        var items: [String: [PHAsset]] = [:]
+
+        // 사진 앱의 앨범·폴더 구조를 그대로 읽음 (사진 앱에서 묶어 둔 폴더가 그대로 폴더)
+        let (children, nodes, albumObjects) = readStructure()
 
         var moved = Set<String>()
         var userFolders: [Folder] = []

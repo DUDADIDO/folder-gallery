@@ -172,9 +172,11 @@ final class FolderPickerViewController: UITableViewController {
             content.image = UIImage(systemName: "plus.rectangle.on.folder")
         } else {
             let folder = folders[indexPath.row]
-            let count = Library.shared.snapshot.items[folder.id]?.count ?? 0
+            let snapshot = Library.shared.snapshot
+            let count = snapshot.items[folder.id]?.count ?? 0
             content.text = folder.title
-            content.secondaryText = String(count)
+            // 켤 때의 임시 목록이면 장수를 모름
+            content.secondaryText = snapshot.partial ? nil : String(count)
             content.image = UIImage(systemName: "folder")
         }
         cell.contentConfiguration = content
