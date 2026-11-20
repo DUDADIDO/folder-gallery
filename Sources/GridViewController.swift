@@ -334,15 +334,12 @@ final class PhotoGridLayout: UICollectionViewLayout {
         invalidateLayout()
     }
 
-    /// 사진이 놓이는 너비와 왼쪽 시작 (가로 화면에서 노치 쪽 안전 영역은 비움)
+    /// 사진이 놓이는 너비와 왼쪽 시작. 순정 iOS 27 은 가로 화면에서도 사진이 양끝까지 꽉 참 (노치 쪽도)
     private var width: CGFloat {
-        guard let view = collectionView else { return 0 }
-        return max(0, view.bounds.width - view.safeAreaInsets.left - view.safeAreaInsets.right)
+        collectionView?.bounds.width ?? 0
     }
 
-    private var originX: CGFloat {
-        collectionView?.safeAreaInsets.left ?? 0
-    }
+    private var originX: CGFloat { 0 }
 
     private func geometry(_ columns: Int) -> Geometry {
         let width = self.width
@@ -1745,6 +1742,33 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 자리 잡는 중이면 그 끝으로, 아니면 지금 그리는 배치로
         let toTarget = settle.map { $0.to >= 1 } ?? (state.target != nil && state.shown == state.target)
         commitPinch(toTarget: toTarget)
+    }
+
+    /// 돌릴 때: 최신 끝에 있었으면 끝에 그대로, 아니면 화면 맨 위 사진이 그대로 맨 위에 (순정)
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        guard isViewLoaded, collectionView != nil, !sections.isEmpty else { return }
+        finishPinchNow()
+        let wasAtLatest = isAtLatest
+        let topItem = collectionView.indexPathsForVisibleItems
+            .compactMap { path in gridLayout.layoutAttributesForItem(at: path).map { (path, $0.frame.minY) } }
+            .filter { $0.1 >= collectionView.contentOffset.y + collectionView.adjustedContentInset.top - 1 }
+            .min { $0.1 < $1.1 }?.0
+        coordinator.animate(alongsideTransition: { [weak self] _ in
+            guard let self else { return }
+            self.collectionView.layoutIfNeeded()
+            if wasAtLatest {
+                self.scrollToLatest()
+            } else if let topItem, let frame = self.gridLayout.layoutAttributesForItem(at: topItem)?.frame {
+                let inset = self.collectionView.adjustedContentInset
+                let maxOffset = max(-inset.top, self.collectionView.contentSize.height + inset.bottom - self.collectionView.bounds.height)
+                self.collectionView.contentOffset.y = min(max(-inset.top, frame.minY - inset.top), maxOffset)
+            }
+        }, completion: { [weak self] _ in
+            guard let self, wasAtLatest else { return }
+            self.scrollToLatest()
+            self.updateModeBar()
+        })
     }
 
     override func viewSafeAreaInsetsDidChange() {

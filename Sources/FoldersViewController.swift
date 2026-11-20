@@ -451,7 +451,10 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
             let inset: CGFloat = 16
             let gap: CGFloat = 8
             let width = environment.container.effectiveContentSize.width
-            let cardSide = max(80, floor((width - inset * 2 - gap * 2) / 3))
+            // 카드 크기는 세로 화면 너비로 셈 (순정: 가로로 돌려도 카드 크기는 그대로, 한 줄에 더 많이)
+            let screen = self?.view.window?.windowScene?.screen.bounds.size ?? environment.container.contentSize
+            let portraitWidth = min(width, min(screen.width, screen.height))
+            let cardSide = max(80, floor((portraitWidth - inset * 2 - gap * 2) / 3))
             let auto = self?.groups.indices.contains(index) == true && self?.groups[index].isAuto == true
             let list = self?.listMode ?? false
 
@@ -480,7 +483,7 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
                 section.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: inset, bottom: 24, trailing: inset)
             } else {
                 // 순정 iOS 27 '앨범' 화면: 두 칸 (양옆 16, 사이 8 — iPhone 14 Pro 에서 약 176pt)
-                let side = max(80, floor((width - inset * 2 - gap) / 2))
+                let side = max(80, floor((portraitWidth - inset * 2 - gap) / 2))
                 let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(widthDimension: .absolute(side),
                                                                                      heightDimension: .absolute(side)))
                 let groupSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(side))
