@@ -475,8 +475,9 @@ final class InfoPanelView: UIView {
             guard let self else { return }
             self.mapLoading = false
             self.snapshotter = nil
-            guard let snapshot else { return }
+            // 실패해도 같은 너비로는 다시 요청하지 않음 (오프라인일 때 배치할 때마다 반복 요청하지 않게)
             self.mapWidth = width
+            guard let snapshot else { return }
             self.mapImage = snapshot.image
             self.mapPoint = snapshot.point(for: location.coordinate)
             self.rebuild()

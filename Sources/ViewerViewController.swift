@@ -134,7 +134,7 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
         mediaView.addSubview(imageView)
 
         spinner.hidesWhenStopped = true
-        spinner.color = .white
+        spinner.color = .gray   // 밝은 바탕·어두운 바탕 모두에서 보이게
         spinner.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(spinner)
         NSLayoutConstraint.activate([
@@ -1226,7 +1226,9 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     func zoomAlignmentRect() -> CGRect {
         let bounds = (isViewLoaded && view.bounds.width > 0) ? view.bounds : fallbackBounds
         if isViewLoaded, let page = currentPage, page.isViewLoaded, page.view.bounds.width > 0 {
-            return page.mediaFrame(in: view)
+            // 아직 자리가 안 잡혔으면(크기 0) 아래의 계산으로
+            let rect = page.mediaFrame(in: view)
+            if rect.width > 1, rect.height > 1 { return rect }
         }
         guard let asset = currentAsset, asset.pixelWidth > 0, asset.pixelHeight > 0 else { return bounds }
         return Geo.fit(CGSize(width: asset.pixelWidth, height: asset.pixelHeight), in: bounds)
