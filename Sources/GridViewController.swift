@@ -257,7 +257,7 @@ final class HeroHeaderView: UICollectionReusableView {
 /// 1칸은 사진마다 원래 비율로 화면 너비를 꽉 채움. 묶음마다 맨 위에 머리글(날짜) 또는 정사각형 앨범 표지
 final class PhotoGridLayout: UICollectionViewLayout {
     /// 보관함을 끝까지 오므린 칸 수
-    static let denseColumns = 15
+    static let denseColumns = 25
     /// 앨범 표지 높이 ÷ 화면 너비 (순정 iOS 27 앨범 화면: iPhone 14 Pro 393pt 너비에 약 480pt)
     static let coverRatio: CGFloat = 1.22
     /// 칸 크기를 바꾸는 중인 상태: columns 배치의 사진 줄(높이·사이)을 scale 배로. 머리글 높이는 그대로
@@ -345,7 +345,8 @@ final class PhotoGridLayout: UICollectionViewLayout {
         if let cached = cache[columns] { return cached }
         let spacing = PhotoGridLayout.spacing
         let perRow = max(1, columns)
-        let side = perRow == 1 ? width : max(20, floor((width - spacing * CGFloat(perRow - 1)) / CGFloat(perRow)))
+        let side = perRow == 1 ? width : max(perRow >= PhotoGridLayout.denseColumns ? 8 : 20,
+                                             floor((width - spacing * CGFloat(perRow - 1)) / CGFloat(perRow)))
         let header = headerHeight ?? (width * PhotoGridLayout.coverRatio).rounded()
         var geometry = Geometry(columns: perRow, x: originX, width: width, side: side, header: header)
         geometry.tops.reserveCapacity(counts.count + 1)
@@ -812,6 +813,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if isRoot {
             layoutTitleOverlay()
             updateModeBar()
+            updateYearChip()
             if needsScrollToLatest, !list.isEmpty, view.bounds.height > 0 {
                 needsScrollToLatest = false
                 scrollToLatest()
@@ -824,8 +826,47 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 위 막대 버튼 줄의 높이에 제목을 맞추고, 그 아래로 날짜·개수, 그 밑까지 어두운 그라데이션
     // MARK: - 년 · 월 · 전체 (순정 iOS 27)
 
+    /// 순정 iOS 27: 년·월 보기이거나, 보관함을 스크롤해 최신 끝에서 떨어져 있으면 [년 | 월 | 전체].
+    /// 최신 끝에 닿으면 탭 막대로 돌아감
     private var modeBarVisible: Bool {
-        folder.id == "all" && !selecting && (columns == PhotoGridLayout.denseColumns || (moments != nil))
+        guard folder.id == "all", !selecting, collectionView != nil else { return false }
+        if moments != nil { return true }
+        guard !list.isEmpty else { return false }
+        let inset = collectionView.adjustedContentInset
+        let maxOffset = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
+        let away = newestFirst ? collectionView.contentOffset.y - (-inset.top) : maxOffset - collectionView.contentOffset.y
+        return away > 40
+    }
+
+    /// 끝까지 오므린 칸에서 제목 아래의 연도 칩 (지금 보이는 연도)
+    private let yearChip: UILabel = {
+        let label = ChipLabel()
+        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.textColor = .label
+        label.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.85)
+        label.layer.cornerRadius = 11
+        label.layer.cornerCurve = .continuous
+        label.clipsToBounds = true
+        label.isHidden = true
+        return label
+    }()
+
+    private func updateYearChip() {
+        guard folder.id == "all", collectionView != nil else { return }
+        let show = columns == PhotoGridLayout.denseColumns && moments == nil && !list.isEmpty
+        yearChip.isHidden = !show
+        guard show else { return }
+        let inset = collectionView.adjustedContentInset
+        let probeY = collectionView.contentOffset.y + max(inset.top, titleOverlay.frame.maxY) + 4
+        let path = collectionView.indexPathForItem(at: CGPoint(x: 10, y: probeY)) ?? collectionView.indexPathsForVisibleItems.min()
+        guard let path, let date = list[flatIndex(path)].creationDate else { return }
+        let text = "\(Calendar.current.component(.year, from: date))년"
+        if yearChip.text != text { yearChip.text = text }
+        yearChip.sizeToFit()
+        yearChip.frame = CGRect(x: view.safeAreaInsets.left + 12, y: titleOverlay.frame.maxY + 4,
+                                width: yearChip.bounds.width, height: 22)
+        if yearChip.superview == nil { view.addSubview(yearChip) }
+        view.bringSubviewToFront(yearChip)
     }
 
     private func updateModeBar() {
@@ -991,6 +1032,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         guard isRoot, scrollView === collectionView else { return }
+        updateModeBar()
+        updateYearChip()
         let text = overlaySubtitle()
         if text != titleOverlay.subtitle { titleOverlay.subtitle = text }
     }
@@ -1442,6 +1485,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             // 칸이 커졌으면 보이는 칸만 더 큰 썸네일로 (작아졌으면 지금 그림으로 충분)
             if grew { reloadVisibleThumbnails() }
             updateModeBar()
+            updateYearChip()
         }
         if reloadPending && !transitioning {
             reloadPending = false
@@ -2693,4 +2737,15 @@ final class AssetMapViewController: UIViewController {
             mapView.showAnnotations(pins, animated: false)
         }
     }
+}
+
+/// 안쪽 여백이 있는 글자 (연도 칩)
+final class ChipLabel: UILabel {
+    var insets = UIEdgeInsets(top: 2, left: 9, bottom: 2, right: 9)
+    override func drawText(in rect: CGRect) { super.drawText(in: rect.inset(by: insets)) }
+    override var intrinsicContentSize: CGSize {
+        let size = super.intrinsicContentSize
+        return CGSize(width: size.width + insets.left + insets.right, height: size.height + insets.top + insets.bottom)
+    }
+    override func sizeThatFits(_ size: CGSize) -> CGSize { intrinsicContentSize }
 }
