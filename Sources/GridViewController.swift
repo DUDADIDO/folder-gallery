@@ -10,6 +10,9 @@ final class AssetCell: UICollectionViewCell {
     private let dim = UIView()
     private let badge = UIImageView()
     private let durationLabel = UILabel()
+    /// 즐겨찾기 표시 (순정처럼 왼쪽 아래 작은 흰 하트)
+    private let heart = UIImageView(image: UIImage(systemName: "heart.fill",
+                                                   withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)))
 
     var assetID: String?
     var requestID: PHImageRequestID = PHInvalidImageRequestID
@@ -39,7 +42,8 @@ final class AssetCell: UICollectionViewCell {
         imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         thumbView.addSubview(imageView)
 
-        dim.backgroundColor = UIColor.black.withAlphaComponent(0.28)
+        // 순정 iOS 27: 고른 칸은 살짝 밝아짐 (어두워지지 않음)
+        dim.backgroundColor = UIColor.white.withAlphaComponent(0.3)
         dim.frame = contentView.bounds
         dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         dim.isHidden = true
@@ -54,6 +58,15 @@ final class AssetCell: UICollectionViewCell {
         durationLabel.translatesAutoresizingMaskIntoConstraints = false
         thumbView.addSubview(durationLabel)
 
+        heart.tintColor = .white
+        heart.layer.shadowColor = UIColor.black.cgColor
+        heart.layer.shadowOpacity = 0.6
+        heart.layer.shadowRadius = 2
+        heart.layer.shadowOffset = .zero
+        heart.isHidden = true
+        heart.translatesAutoresizingMaskIntoConstraints = false
+        thumbView.addSubview(heart)
+
         badge.translatesAutoresizingMaskIntoConstraints = false
         badge.isHidden = true
         contentView.addSubview(badge)
@@ -61,10 +74,13 @@ final class AssetCell: UICollectionViewCell {
         NSLayoutConstraint.activate([
             durationLabel.trailingAnchor.constraint(equalTo: thumbView.trailingAnchor, constant: -5),
             durationLabel.bottomAnchor.constraint(equalTo: thumbView.bottomAnchor, constant: -4),
-            badge.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5),
-            badge.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 5),
-            badge.widthAnchor.constraint(equalToConstant: 24),
-            badge.heightAnchor.constraint(equalToConstant: 24),
+            heart.leadingAnchor.constraint(equalTo: thumbView.leadingAnchor, constant: 5),
+            heart.bottomAnchor.constraint(equalTo: thumbView.bottomAnchor, constant: -5),
+            // 순정처럼 오른쪽 아래
+            badge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+            badge.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -6),
+            badge.widthAnchor.constraint(equalToConstant: 26),
+            badge.heightAnchor.constraint(equalToConstant: 26),
         ])
     }
 
@@ -90,6 +106,10 @@ final class AssetCell: UICollectionViewCell {
         }
     }
 
+    func setFavorite(_ on: Bool) {
+        heart.isHidden = !on
+    }
+
     func setDuration(_ seconds: TimeInterval?) {
         guard let seconds else {
             durationLabel.text = nil
@@ -100,17 +120,18 @@ final class AssetCell: UICollectionViewCell {
         durationLabel.text = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 
+    /// 순정 iOS 27: 고르지 않은 칸에는 아무 표시 없음. 고른 칸만 밝게 + 흰 테두리 파란 체크
     private func updateBadge() {
-        dim.isHidden = !(selecting && isSelected)
-        badge.isHidden = !selecting
-        guard selecting else { return }
-        if isSelected {
-            let config = UIImage.SymbolConfiguration(paletteColors: [.white, .systemBlue])
-            badge.image = UIImage(systemName: "checkmark.circle.fill", withConfiguration: config)
-        } else {
-            let config = UIImage.SymbolConfiguration(paletteColors: [.white])
-            badge.image = UIImage(systemName: "circle", withConfiguration: config)
-        }
+        let on = selecting && isSelected
+        dim.isHidden = !on
+        badge.isHidden = !on
+        guard on else { return }
+        let config = UIImage.SymbolConfiguration(paletteColors: [.white, .systemBlue])
+            .applying(UIImage.SymbolConfiguration(pointSize: 22, weight: .regular))
+        badge.image = UIImage(systemName: "checkmark.circle.fill", withConfiguration: config)
+        badge.backgroundColor = .white
+        badge.layer.cornerRadius = 13
+        badge.contentMode = .center
     }
 }
 
@@ -647,7 +668,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     var zoomCornerRatio: CGFloat = 0
 
     private lazy var shareItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: self, action: #selector(shareSelected))
-    private lazy var moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeMoreMenu())
+    /// 순정 iOS 27 선택 막대 가운데: "선택된 항목 표시(N개)" — 누르면 고른 것만 보기 / 다시 누르면 전체
+    private lazy var showSelectedItem = UIBarButtonItem(title: "항목 선택", style: .plain, target: self, action: #selector(toggleShowSelected))
+    /// 고른 것만 보는 중이면 그때의 전체 목록 (돌아갈 때 씀)
+    private var listBeforeShowingSelected: AssetList?
     private lazy var deleteItem = UIBarButtonItem(image: UIImage(systemName: "trash"), style: .plain, target: self, action: #selector(deleteSelected))
 
     private let dayFormatter: DateFormatter = {
@@ -776,7 +800,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 순정처럼 제목·그라데이션은 사진이 밑에 있을 때만 (선택 중에는 위 막대 제목으로)
     private func updateTitleOverlay() {
         guard isRoot, isViewLoaded, collectionView != nil else { return }
-        titleOverlay.isHidden = selecting
+        // 순정 iOS 27: 선택 중에도 제목·부제는 그대로
         titleOverlay.subtitle = overlaySubtitle()
         let dark = !list.isEmpty
         if titleOverlay.dark != dark {
@@ -825,7 +849,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     override var preferredStatusBarStyle: UIStatusBarStyle {
         // 사진 위 어두운 그라데이션에서는 흰 글자 (순정처럼)
-        isRoot && titleOverlay.dark && !selecting ? .lightContent : .default
+        isRoot && titleOverlay.dark ? .lightContent : .default
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -1494,6 +1518,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         cell.selecting = selecting
         applyZoomCollapse(to: cell)
         cell.setDuration(asset.mediaType == .video ? asset.duration : nil)
+        cell.setFavorite(asset.isFavorite)
         loadThumbnail(into: cell, asset: asset)
         return cell
     }
@@ -1673,6 +1698,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             for path in collectionView.indexPathsForSelectedItems ?? [] {
                 collectionView.deselectItem(at: path, animated: false)
             }
+            // 고른 것만 보던 중이면 전체로
+            if listBeforeShowingSelected != nil {
+                listBeforeShowingSelected = nil
+                reloadFromLibrary(force: true)
+            }
         }
         selecting = on
         collectionView.isEditing = on
@@ -1686,7 +1716,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 옆으로 끌어 선택하는 동안 '밀어서 뒤로'가 잡히지 않게 (보기 화면·앨범 화면이 막는 것과는 따로 기억)
         navigationController?.setBackSwipe(blocked: on ? UINavigationController.BackSwipeBlock.all : nil, by: selectionSwipeToken)
         if on {
-            toolbarItems = [shareItem, UIBarButtonItem.flexibleSpace(), moreItem, UIBarButtonItem.flexibleSpace(), deleteItem]
+            toolbarItems = [shareItem, UIBarButtonItem.flexibleSpace(), showSelectedItem, UIBarButtonItem.flexibleSpace(), deleteItem]
         }
         navigationController?.setToolbarHidden(!on, animated: true)
         if !on {
@@ -1765,13 +1795,23 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         selectedPerSection = perSection
         if selecting {
             let count = selectedPaths.count
-            navigationItem.title = count == 0 ? "항목 선택" : "\(count)장 선택"
+            // 순정 iOS 27: 제목은 그대로 두고(보관함은 사진 위 제목), 오른쪽에 [정렬·필터 ⋯] [닫기 X]
+            navigationItem.title = isRoot ? nil : (count == 0 ? "항목 선택" : "\(count)장 선택")
             navigationItem.hidesBackButton = true
-            navigationItem.leftBarButtonItem = UIBarButtonItem(title: "취소", style: .plain, target: self, action: #selector(cancelSelecting))
-            let allSelected = count == list.count && count > 0
-            navigationItem.rightBarButtonItem = UIBarButtonItem(title: allSelected ? "전체 해제" : "전체 선택", style: .plain,
-                                                                target: self, action: #selector(toggleAll))
-            for item in [shareItem, moreItem, deleteItem] {
+            navigationItem.leftBarButtonItem = nil
+            let close = UIBarButtonItem(image: UIImage(systemName: "xmark"), style: .plain, target: self, action: #selector(cancelSelecting))
+            let more = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeMoreMenu())
+            more.isEnabled = count > 0
+            var right: [UIBarButtonItem] = [close, UIBarButtonItem.fixedSpace(8), more]
+            if isRoot {
+                right.append(UIBarButtonItem(image: UIImage(systemName: libraryFilter == .all ? "line.3.horizontal.decrease"
+                                                             : "line.3.horizontal.decrease.circle.fill"), menu: makeLibraryMenu()))
+            }
+            navigationItem.rightBarButtonItems = right
+            showSelectedItem.title = listBeforeShowingSelected != nil ? "모든 항목 표시"
+                : (count == 0 ? "항목 선택" : "선택된 항목 표시(\(count)개)")
+            showSelectedItem.isEnabled = count > 0 || listBeforeShowingSelected != nil
+            for item in [shareItem, deleteItem] {
                 item.isEnabled = count > 0
             }
         } else {
@@ -1893,17 +1933,112 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     /// 갤럭시의 '더보기': 앨범으로 이동 · 앨범으로 복사
+    /// 순정 iOS 27 선택 중 ⋯ 메뉴: 위 줄(복사·복제·가리기) / 즐겨찾기 / 추가 대상 › / 전체 선택
     private func makeMoreMenu() -> UIMenu {
-        var actions: [UIAction] = [
+        let top = UIMenu(options: .displayInline, preferredElementSize: .medium, children: [
+            UIAction(title: "복사", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in self?.copySelected() },
+            UIAction(title: "복제", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in self?.duplicateSelected() },
+            UIAction(title: "가리기", image: UIImage(systemName: "eye.slash")) { [weak self] _ in self?.hideSelected() },
+        ])
+        let assets = selectedAssets()
+        let allFavorite = !assets.isEmpty && assets.allSatisfy(\.isFavorite)
+        let favorite = UIMenu(options: .displayInline, children: [
+            UIAction(title: allFavorite ? "즐겨찾기 해제" : "즐겨찾기", image: UIImage(systemName: allFavorite ? "heart.slash" : "heart")) { [weak self] _ in
+                self?.favoriteSelected(!allFavorite)
+            },
+        ])
+        var addActions: [UIAction] = [
+            UIAction(title: "앨범에 추가", image: UIImage(systemName: "rectangle.stack.badge.plus")) { [weak self] _ in self?.sendSelected(copy: true) },
             UIAction(title: "앨범으로 이동", image: UIImage(systemName: "folder")) { [weak self] _ in self?.sendSelected(copy: false) },
-            UIAction(title: "앨범으로 복사", image: UIImage(systemName: "plus.rectangle.on.folder")) { [weak self] _ in self?.sendSelected(copy: true) },
         ]
         if folder.isUser {
-            actions.append(UIAction(title: "이 앨범에서 빼기", image: UIImage(systemName: "minus.circle")) { [weak self] _ in
+            addActions.append(UIAction(title: "이 앨범에서 빼기", image: UIImage(systemName: "minus.circle")) { [weak self] _ in
                 self?.removeSelectedFromAlbum()
             })
         }
-        return UIMenu(children: actions)
+        let addTo = UIMenu(title: "추가 대상", image: UIImage(systemName: "photo.on.rectangle.angled"), children: addActions)
+        let allSelected = assets.count == list.count && !assets.isEmpty
+        let all = UIAction(title: allSelected ? "전체 해제" : "전체 선택",
+                           image: UIImage(systemName: allSelected ? "circle.dashed" : "checkmark.circle")) { [weak self] _ in
+            self?.toggleAll()
+        }
+        return UIMenu(children: [top, favorite, UIMenu(options: .displayInline, children: [addTo, all])])
+    }
+
+    @objc private func toggleShowSelected() {
+        if let before = listBeforeShowingSelected {
+            // 모든 항목으로 돌아감 (고른 것은 그대로)
+            let keep = selectedAssets().map(\.localIdentifier)
+            listBeforeShowingSelected = nil
+            list = before
+            reloadShown(keeping: keep)
+            return
+        }
+        let chosen = selectedAssets()
+        guard !chosen.isEmpty else { return }
+        listBeforeShowingSelected = list
+        list = AssetList.make(chosen)
+        reloadShown(keeping: chosen.map(\.localIdentifier))
+    }
+
+    /// 지금 list 로 격자를 다시 그리고 keep 을 다시 고름
+    private func reloadShown(keeping keep: [String]) {
+        buildSections()
+        gridLayout.setSections(sections.map { $0.range.count })
+        collectionView.reloadData()
+        collectionView.layoutIfNeeded()
+        for flat in list.indexes(ofIDs: keep) {
+            if let path = indexPath(forFlat: flat) {
+                collectionView.selectItem(at: path, animated: false, scrollPosition: [])
+            }
+        }
+        scrollToLatest()
+        updateChrome()
+    }
+
+    private func copySelected() {
+        let assets = selectedAssets()
+        guard !assets.isEmpty else { return }
+        var items: [[String: Any]] = []
+        let group = DispatchGroup()
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.version = .current
+        for asset in assets where asset.mediaType == .image {
+            group.enter()
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, _ in
+                if let data { items.append([uti ?? "public.jpeg": data]) }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            UIPasteboard.general.items = items
+        }
+    }
+
+    private func duplicateSelected() {
+        let assets = selectedAssets()
+        setSelecting(false)
+        for asset in assets {
+            Library.shared.duplicate(asset) { [weak self] ok in
+                if !ok { self?.toast("복제하지 못한 항목이 있어요") }
+            }
+        }
+    }
+
+    private func hideSelected() {
+        let assets = selectedAssets()
+        guard !assets.isEmpty else { return }
+        Library.shared.setHidden(assets, true) { [weak self] ok in
+            if ok { self?.setSelecting(false) }
+        }
+    }
+
+    private func favoriteSelected(_ on: Bool) {
+        for asset in selectedAssets() {
+            Library.shared.setFavorite(asset, on)
+        }
+        setSelecting(false)
     }
 
     private func sendSelected(copy: Bool) {
