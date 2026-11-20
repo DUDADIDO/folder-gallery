@@ -135,6 +135,8 @@ final class AssetCell: UICollectionViewCell {
         let on = selecting && isSelected
         dim.isHidden = !on
         badge.isHidden = !on
+        // 순정: 고른 비디오는 길이 대신 체크만
+        durationLabel.alpha = on ? 0 : 1
         guard on else { return }
         let config = UIImage.SymbolConfiguration(paletteColors: [.white, .systemBlue])
             .applying(UIImage.SymbolConfiguration(pointSize: 19, weight: .regular))
