@@ -384,9 +384,104 @@ enum DetailsLoader {
 
 // MARK: - 정보 카드 (사진 바로 아래에 이어지는 부분)
 
-/// 순정 사진 앱의 정보 화면처럼 둥근 회색 카드들. 사진 페이지 안에서 사진 아래에 붙음
+/// 정보 카드에서 누른 것 (보기 화면이 처리)
+enum InfoAction {
+    /// 날짜·시간 조정
+    case adjustDate
+    /// 장소를 지도 앱에서 열기
+    case openPlace
+    /// 저장한 앱의 자동 분류 앨범 열기 (앨범 ID)
+    case openSource(String)
+    /// 보관함 탭에서 이 사진 보기
+    case showInLibrary
+}
+
+/// 누를 수 있는 줄 (누르는 동안 살짝 어두워짐)
+private final class TapRow: UIControl {
+    private let action: () -> Void
+
+    init(content: UIView, vertical: CGFloat, action: @escaping () -> Void) {
+        self.action = action
+        super.init(frame: .zero)
+        content.isUserInteractionEnabled = false
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: topAnchor, constant: vertical),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -vertical),
+            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: InfoPanelView.textInset),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -InfoPanelView.textInset),
+        ])
+        addTarget(self, action: #selector(tapped), for: .touchUpInside)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isHighlighted: Bool {
+        didSet { backgroundColor = isHighlighted ? .systemFill : .clear }
+    }
+
+    @objc private func tapped() {
+        action()
+    }
+}
+
+/// 지도 위의 핀: 그 사진을 흰 테두리의 작은 둥근 네모에 넣고 아래에 꼬리 (꼬리 끝이 찍은 자리)
+private final class PhotoPinView: UIView {
+    static let side: CGFloat = 48
+    static let tail: CGFloat = 7
+
+    private let imageView = UIImageView()
+    private let tailLayer = CAShapeLayer()
+
+    init(image: UIImage?) {
+        super.init(frame: CGRect(x: 0, y: 0, width: PhotoPinView.side, height: PhotoPinView.side + PhotoPinView.tail))
+        let body = UIView(frame: CGRect(x: 0, y: 0, width: PhotoPinView.side, height: PhotoPinView.side))
+        body.backgroundColor = .white
+        body.layer.cornerRadius = 6
+        body.layer.cornerCurve = .continuous
+        addSubview(body)
+        imageView.image = image
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        imageView.backgroundColor = .systemGray5
+        imageView.layer.cornerRadius = 4
+        imageView.layer.cornerCurve = .continuous
+        imageView.frame = body.bounds.insetBy(dx: 3, dy: 3)
+        body.addSubview(imageView)
+
+        let path = UIBezierPath()
+        let mid = PhotoPinView.side / 2
+        path.move(to: CGPoint(x: mid - 6, y: PhotoPinView.side - 0.5))
+        path.addLine(to: CGPoint(x: mid, y: PhotoPinView.side + PhotoPinView.tail))
+        path.addLine(to: CGPoint(x: mid + 6, y: PhotoPinView.side - 0.5))
+        path.close()
+        tailLayer.path = path.cgPath
+        tailLayer.fillColor = UIColor.white.cgColor
+        layer.addSublayer(tailLayer)
+
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOpacity = 0.22
+        layer.shadowRadius = 4
+        layer.shadowOffset = CGSize(width: 0, height: 1)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: PhotoPinView.side, height: PhotoPinView.side + PhotoPinView.tail)
+    }
+}
+
+/// 순정 사진 앱의 정보 화면처럼 둥근 회색 카드들. 사진 페이지 안에서 사진 아래에 붙음.
+/// 순서(순정과 같음): 날짜·파일 이름 / 카메라·형식 / 렌즈·크기 / 촬영 값 → 지도·장소 → 저장한 앱 → 모든 사진에서 보기 → (이 앱만) 들어 있는 앨범.
+/// 캡션·키워드는 사진 앱 공개 API 로 읽고 쓸 수 없어서 넣지 않음
 final class InfoPanelView: UIView {
-    private let asset: PHAsset
+    private(set) var asset: PHAsset
     private let stack = UIStackView()
     private var details: PhotoDetails?
     private var placeName: String?
@@ -399,22 +494,30 @@ final class InfoPanelView: UIView {
     private var albumNames: [String]?
     /// 내용이 바뀌어 높이가 달라졌을 때
     var onContentChange: (() -> Void)?
+    /// 카드 안의 버튼·줄을 눌렀을 때
+    var onAction: ((InfoAction) -> Void)?
 
-    private static let mapHeight: CGFloat = 170
+    /// 화면 가장자리 ~ 카드 (순정 화면에서 잰 값)
+    static let sideInset: CGFloat = 17
+    /// 카드 가장자리 ~ 글자
+    static let textInset: CGFloat = 16
+    static let cardSpacing: CGFloat = 18
+    static let cornerRadius: CGFloat = 24
+    private static let mapHeight: CGFloat = 160
 
     init(asset: PHAsset) {
         self.asset = asset
         super.init(frame: .zero)
         backgroundColor = .clear
         stack.axis = .vertical
-        stack.spacing = 12
+        stack.spacing = InfoPanelView.cardSpacing
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: InfoPanelView.sideInset),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -InfoPanelView.sideInset),
         ])
         details = DetailsLoader.cached(asset)
         if let location = asset.location {
@@ -426,6 +529,13 @@ final class InfoPanelView: UIView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// 사진 정보가 바뀌었을 때 (날짜 조정 등). 같은 사진의 새 값
+    func update(asset fresh: PHAsset) {
+        guard fresh.localIdentifier == asset.localIdentifier else { return }
+        asset = fresh
+        rebuild()
     }
 
     private func load() {
@@ -448,7 +558,7 @@ final class InfoPanelView: UIView {
             options.deliveryMode = .highQualityFormat
             options.resizeMode = .fast
             options.isNetworkAccessAllowed = true
-            Thumbs.manager.requestImage(for: asset, targetSize: CGSize(width: 120, height: 120), contentMode: .aspectFill,
+            Thumbs.manager.requestImage(for: asset, targetSize: CGSize(width: 150, height: 150), contentMode: .aspectFill,
                                         options: options) { [weak self] image, _ in
                 guard let self, let image else { return }
                 self.pinImage = image
@@ -459,7 +569,7 @@ final class InfoPanelView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        startMapIfNeeded(width: bounds.width - 28)
+        startMapIfNeeded(width: bounds.width - InfoPanelView.sideInset * 2)
     }
 
     /// 작은 지도 그림 (MapKit 스냅숏, 위치 권한 필요 없음)
@@ -469,6 +579,7 @@ final class InfoPanelView: UIView {
         let options = MKMapSnapshotter.Options()
         options.region = MKCoordinateRegion(center: location.coordinate, latitudinalMeters: 700, longitudinalMeters: 700)
         options.size = CGSize(width: width, height: InfoPanelView.mapHeight)
+        options.traitCollection = traitCollection
         let snapshotter = MKMapSnapshotter(options: options)
         self.snapshotter = snapshotter   // 끝날 때까지 붙잡아 둠
         snapshotter.start { [weak self] snapshot, _ in
@@ -495,27 +606,34 @@ final class InfoPanelView: UIView {
         return label
     }
 
-    private func padded(_ content: UIView, vertical: CGFloat = 13) -> UIView {
+    private func padded(_ content: UIView, vertical: CGFloat) -> UIView {
         let box = UIView()
         content.translatesAutoresizingMaskIntoConstraints = false
         box.addSubview(content)
         NSLayoutConstraint.activate([
             content.topAnchor.constraint(equalTo: box.topAnchor, constant: vertical),
             content.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -vertical),
-            content.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 18),
-            content.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -18),
+            content.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: InfoPanelView.textInset),
+            content.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -InfoPanelView.textInset),
         ])
         return box
     }
 
+    /// 가는 선 두께 (화면에 붙기 전이면 0.5)
+    private var hairline: CGFloat {
+        let scale = traitCollection.displayScale
+        return scale > 0 ? 1 / scale : 0.5
+    }
+
+    /// 카드 끝에서 끝까지 이어지는 가는 가로선
     private func separator() -> UIView {
         let line = UIView()
         line.backgroundColor = .separator
-        line.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
+        line.heightAnchor.constraint(equalToConstant: hairline).isActive = true
         return line
     }
 
-    /// 줄들을 얇은 선으로 나눈 둥근 카드
+    /// 줄들을 가는 선으로 나눈 둥근 카드
     private func card(_ rows: [UIView], separators: Bool = true) -> UIView {
         let column = UIStackView()
         column.axis = .vertical
@@ -524,44 +642,125 @@ final class InfoPanelView: UIView {
             column.addArrangedSubview(row)
         }
         column.backgroundColor = .secondarySystemBackground
-        column.layer.cornerRadius = 24
+        column.layer.cornerRadius = InfoPanelView.cornerRadius
         column.layer.cornerCurve = .continuous
         column.clipsToBounds = true
         return column
     }
 
-    private func badge(_ text: String) -> UIView {
-        let label = PaddedLabel()
-        label.text = text
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .secondaryLabel
-        label.backgroundColor = .tertiarySystemFill
-        label.layer.cornerRadius = 8
-        label.layer.masksToBounds = true
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
-        return label
+    /// 한 줄짜리 카드 (모든 사진에서 보기 · 저장한 앱 · 앨범)
+    private func singleRowCard(_ content: UIView, action: (() -> Void)?) -> UIView {
+        if let action {
+            return card([TapRow(content: content, vertical: 15, action: action)])
+        }
+        return card([padded(content, vertical: 15)])
     }
 
+    /// 파란 글자 버튼 ("조정")
+    private func adjustButton(_ action: @escaping () -> Void) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setTitle("조정", for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 17)
+        button.tintColor = .systemBlue
+        button.contentHorizontalAlignment = .trailing
+        button.addAction(UIAction { _ in action() }, for: .touchUpInside)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return button
+    }
+
+    /// 형식 배지 (JPEG · HEIF …)
+    private func badge(_ text: String) -> UIView {
+        let box = UIView()
+        box.backgroundColor = .tertiarySystemFill
+        box.layer.cornerRadius = 6
+        box.layer.cornerCurve = .continuous
+        let label = UILabel()
+        label.text = text
+        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.textColor = .secondaryLabel
+        label.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: box.topAnchor, constant: 3),
+            label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -3),
+            label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 7),
+            label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -7),
+        ])
+        box.setContentHuggingPriority(.required, for: .horizontal)
+        box.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return box
+    }
+
+    /// Live Photo 배지 (동그라미 안에 Live 모양)
+    private func liveBadge() -> UIView {
+        let box = UIView()
+        box.backgroundColor = .tertiarySystemFill
+        box.layer.cornerRadius = 11
+        let glyph = UIImageView(image: UIImage(systemName: "livephoto"))
+        glyph.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        glyph.tintColor = .secondaryLabel
+        glyph.contentMode = .center
+        glyph.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(glyph)
+        NSLayoutConstraint.activate([
+            box.widthAnchor.constraint(equalToConstant: 22),
+            box.heightAnchor.constraint(equalToConstant: 22),
+            glyph.centerXAnchor.constraint(equalTo: box.centerXAnchor),
+            glyph.centerYAnchor.constraint(equalTo: box.centerYAnchor),
+        ])
+        box.setContentHuggingPriority(.required, for: .horizontal)
+        box.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return box
+    }
+
+    /// 촬영 값 다섯 칸. 칸 사이에 짧은 세로선, 첫 칸은 왼쪽·끝 칸은 오른쪽 정렬
+    private func exifRow(_ values: [String]) -> UIView {
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.distribution = .fillEqually
+        var labels: [UILabel] = []
+        for (index, value) in values.enumerated() {
+            let item = label(value, size: 13, color: .secondaryLabel)
+            item.numberOfLines = 1
+            item.adjustsFontSizeToFitWidth = true
+            item.minimumScaleFactor = 0.7
+            item.textAlignment = index == 0 ? .left : (index == values.count - 1 ? .right : .center)
+            row.addArrangedSubview(item)
+            labels.append(item)
+        }
+        let box = padded(row, vertical: 12)
+        for item in labels.dropLast() {
+            let line = UIView()
+            line.backgroundColor = .separator
+            line.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(line)
+            NSLayoutConstraint.activate([
+                line.centerXAnchor.constraint(equalTo: item.trailingAnchor),
+                line.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+                line.widthAnchor.constraint(equalToConstant: hairline),
+                line.heightAnchor.constraint(equalToConstant: 18),
+            ])
+        }
+        return box
+    }
+
+    /// 카드 위쪽을 채우는 지도 + 그 자리에 사진 핀. 누르면 지도 앱에서 열기
     private func mapView() -> UIView {
-        let container = UIView()
+        let container = UIControl()
         container.backgroundColor = .tertiarySystemFill
+        container.clipsToBounds = true
         container.heightAnchor.constraint(equalToConstant: InfoPanelView.mapHeight).isActive = true
+        container.addAction(UIAction { [weak self] _ in self?.onAction?(.openPlace) }, for: .touchUpInside)
         guard let mapImage else { return container }
         let imageView = UIImageView(image: mapImage)
         imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
+        imageView.isUserInteractionEnabled = false
         imageView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(imageView)
-        // 순정처럼 핀 자리에 그 사진을 작게
-        let pin = UIImageView(image: pinImage ?? UIImage(systemName: "mappin.circle.fill"))
-        pin.contentMode = .scaleAspectFill
-        pin.clipsToBounds = true
-        pin.tintColor = .systemRed
-        pin.backgroundColor = .white
-        pin.layer.borderColor = UIColor.white.cgColor
-        pin.layer.borderWidth = 2
-        pin.layer.cornerRadius = 6
+        let pin = PhotoPinView(image: pinImage)
+        pin.isUserInteractionEnabled = false
         pin.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(pin)
         NSLayoutConstraint.activate([
@@ -569,8 +768,9 @@ final class InfoPanelView: UIView {
             imageView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             imageView.widthAnchor.constraint(equalToConstant: mapImage.size.width),
             imageView.heightAnchor.constraint(equalToConstant: mapImage.size.height),
-            pin.widthAnchor.constraint(equalToConstant: 38),
-            pin.heightAnchor.constraint(equalToConstant: 38),
+            pin.widthAnchor.constraint(equalToConstant: PhotoPinView.side),
+            pin.heightAnchor.constraint(equalToConstant: PhotoPinView.side + PhotoPinView.tail),
+            // 꼬리 끝이 찍은 자리
             pin.centerXAnchor.constraint(equalTo: container.leadingAnchor, constant: mapPoint.x),
             pin.bottomAnchor.constraint(equalTo: container.topAnchor, constant: mapPoint.y),
         ])
@@ -584,25 +784,44 @@ final class InfoPanelView: UIView {
         }
         let isVideo = asset.mediaType == .video
         let isScreenshot = asset.mediaSubtypes.contains(.photoScreenshot)
+        let isLive = asset.mediaType == .image && asset.mediaSubtypes.contains(.photoLive)
         let resources = PHAssetResource.assetResources(for: asset)
         let primaryType: PHAssetResourceType = isVideo ? .video : .photo
         let primary = resources.first { $0.type == primaryType } ?? resources.first
         let fileName = primary?.originalFilename ?? ""
         let entry = Library.shared.classifier.entry(for: asset.localIdentifier)
 
-        // 1) 날짜 · 파일 이름 / 카메라 · 형식 / 렌즈 · 크기 / 촬영 값
+        // 1) 날짜·파일 이름 / 카메라·형식 / 렌즈·크기 / 촬영 값
         var rows: [UIView] = []
 
         let header = UIStackView()
         header.axis = .vertical
-        header.spacing = 3
-        if let date = asset.creationDate {
-            header.addArrangedSubview(label(DateText.long(date), weight: .medium))
+        header.spacing = 2
+        let dateText = asset.creationDate.map { DateText.long($0) } ?? "날짜 없음"
+        let dateLabel = label(dateText, weight: .semibold)
+        let dateLine = UIStackView(arrangedSubviews: [dateLabel])
+        dateLine.axis = .horizontal
+        dateLine.alignment = .firstBaseline
+        dateLine.spacing = 8
+        // 날짜 조정은 사진 앱이 허락하는 사진만 (공유 앨범 사진 등은 안 됨)
+        if asset.canPerform(.properties) {
+            dateLine.addArrangedSubview(adjustButton { [weak self] in self?.onAction?(.adjustDate) })
         }
+        header.addArrangedSubview(dateLine)
         if !fileName.isEmpty {
+            // 순정의 iCloud 표시는 공개 API 로 상태를 알 수 없어서 넣지 않음
             header.addArrangedSubview(label((fileName as NSString).deletingPathExtension, size: 15, color: .secondaryLabel))
         }
-        rows.append(padded(header))
+        let headerBox = UIView()
+        header.translatesAutoresizingMaskIntoConstraints = false
+        headerBox.addSubview(header)
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: headerBox.topAnchor, constant: 14),
+            header.bottomAnchor.constraint(equalTo: headerBox.bottomAnchor, constant: -15),
+            header.leadingAnchor.constraint(equalTo: headerBox.leadingAnchor, constant: InfoPanelView.textInset),
+            header.trailingAnchor.constraint(equalTo: headerBox.trailingAnchor, constant: -InfoPanelView.textInset),
+        ])
+        rows.append(headerBox)
 
         var cameraText = details.flatMap { DetailsLoader.cameraText($0) } ?? ""
         if cameraText.isEmpty {
@@ -619,18 +838,22 @@ final class InfoPanelView: UIView {
         if format == "JPG" { format = "JPEG" }
         if format == "HEIC" { format = "HEIF" }
         let cameraLabel = label(cameraText, color: details == nil && !isScreenshot && !isVideo ? .secondaryLabel : .label)
+        cameraLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let cameraRow = UIStackView(arrangedSubviews: [cameraLabel])
         cameraRow.axis = .horizontal
         cameraRow.alignment = .center
-        cameraRow.spacing = 8
+        cameraRow.spacing = 6
         if !format.isEmpty { cameraRow.addArrangedSubview(badge(format)) }
-        rows.append(padded(cameraRow))
+        if isLive { cameraRow.addArrangedSubview(liveBadge()) }
+        rows.append(padded(cameraRow, vertical: 12))
 
-        let megapixels = Double(asset.pixelWidth * asset.pixelHeight) / 1_000_000
-        var sizeParts = [megapixels >= 10 ? "\(Int(megapixels.rounded()))MP" : String(format: "%.1fMP", megapixels),
+        let pixels = Double(asset.pixelWidth * asset.pixelHeight) / 1_000_000
+        var sizeParts = [pixels >= 1 ? "\(Int(pixels.rounded()))MP" : String(format: "%.1fMP", pixels),
                          "\(asset.pixelWidth) × \(asset.pixelHeight)"]
         if let bytes = details?.fileSize {
-            sizeParts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
+            // 순정처럼 숫자와 단위를 붙여서 (3.3MB)
+            let text = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+            sizeParts.append(text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "\u{00A0}", with: ""))
         }
         if isVideo {
             let total = Int(asset.duration.rounded())
@@ -638,43 +861,78 @@ final class InfoPanelView: UIView {
         }
         let lensColumn = UIStackView()
         lensColumn.axis = .vertical
-        lensColumn.spacing = 3
+        lensColumn.spacing = 4
         if !isVideo, let details, let lens = DetailsLoader.lensText(details) {
             lensColumn.addArrangedSubview(label(lens, size: 15, color: .secondaryLabel))
         }
         lensColumn.addArrangedSubview(label(sizeParts.joined(separator: " • "), size: 15, color: .secondaryLabel))
-        rows.append(padded(lensColumn))
+        rows.append(padded(lensColumn, vertical: 14))
 
         if !isVideo, let details, let values = DetailsLoader.exifValues(details) {
-            let exifRow = UIStackView()
-            exifRow.axis = .horizontal
-            exifRow.distribution = .fillEqually
-            for value in values {
-                let item = label(value, size: 13, color: .secondaryLabel)
-                item.textAlignment = .center
-                item.numberOfLines = 1
-                item.adjustsFontSizeToFitWidth = true
-                item.minimumScaleFactor = 0.7
-                exifRow.addArrangedSubview(item)
-            }
-            rows.append(padded(exifRow, vertical: 11))
+            rows.append(exifRow(values))
         }
         stack.addArrangedSubview(card(rows))
 
-        // 2) 지도 + 장소 이름
+        // 2) 지도 + 장소 이름 (파란 글자 + 꺾쇠, 누르면 지도 앱에서). 위치 조정은 넣지 않음
         if let location = asset.location {
             let place = placeName ?? String(format: "%.5f, %.5f", location.coordinate.latitude, location.coordinate.longitude)
-            stack.addArrangedSubview(card([mapView(), padded(label(place, size: 15, weight: .medium))], separators: false))
+            let placeLabel = label(place, color: .systemBlue)
+            placeLabel.numberOfLines = 1
+            placeLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+            let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
+            chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+            chevron.tintColor = .tertiaryLabel
+            chevron.setContentHuggingPriority(.required, for: .horizontal)
+            chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
+            let placeRow = UIStackView(arrangedSubviews: [placeLabel, chevron, UIView()])
+            placeRow.axis = .horizontal
+            placeRow.alignment = .center
+            placeRow.spacing = 6
+            let row = TapRow(content: placeRow, vertical: 12) { [weak self] in self?.onAction?(.openPlace) }
+            stack.addArrangedSubview(card([mapView(), row], separators: false))
         }
 
-        // 3) 어디서 저장됐는지 (알 수 있을 때)
+        // 3) 어디서 저장됐는지: "[앱 이름(굵게)]에서 저장됨 ›" (앱 아이콘은 공개 API 로 못 얻어서 뺌)
         if let app = entry?.app {
-            stack.addArrangedSubview(card([padded(label(app + "에서 저장됨"))]))
-        } else if entry?.cat == .camera {
-            stack.addArrangedSubview(card([padded(label("카메라로 촬영"))]))
+            let text = NSMutableAttributedString(string: app, attributes: [
+                .font: UIFont.systemFont(ofSize: 17, weight: .semibold), .foregroundColor: UIColor.label,
+            ])
+            text.append(NSAttributedString(string: "에서 저장됨", attributes: [
+                .font: UIFont.systemFont(ofSize: 17), .foregroundColor: UIColor.secondaryLabel,
+            ]))
+            let sourceLabel = UILabel()
+            sourceLabel.attributedText = text
+            sourceLabel.numberOfLines = 0
+            sourceLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+            // 그 앱의 자동 분류 앨범이 있고 숨기지 않았을 때만 눌러서 열 수 있음 (숨긴 앨범은 Face ID 를 거쳐야 하므로)
+            let folderID = "app:" + app
+            let canOpen = Library.shared.snapshot.folders.contains { $0.id == folderID }
+                && !Prefs.hiddenAlbums.contains(folderID)
+            let sourceRow = UIStackView(arrangedSubviews: [sourceLabel])
+            sourceRow.axis = .horizontal
+            sourceRow.alignment = .center
+            sourceRow.spacing = 6
+            if canOpen {
+                let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
+                chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+                chevron.tintColor = .tertiaryLabel
+                chevron.setContentHuggingPriority(.required, for: .horizontal)
+                sourceRow.addArrangedSubview(chevron)
+            }
+            sourceRow.addArrangedSubview(UIView())
+            var open: (() -> Void)?
+            if canOpen {
+                open = { [weak self] in self?.onAction?(.openSource(folderID)) }
+            }
+            stack.addArrangedSubview(singleRowCard(sourceRow, action: open))
         }
 
-        // 4) 들어 있는 앨범 (이 앱에서 더한 것)
+        // 4) 모든 사진에서 보기
+        stack.addArrangedSubview(singleRowCard(label("모든 사진에서 보기", color: .systemBlue)) { [weak self] in
+            self?.onAction?(.showInLibrary)
+        })
+
+        // 5) 들어 있는 앨범 (이 앱에서 더한 것. 맨 끝)
         if albumNames == nil {
             let snapshot = Library.shared.snapshot
             let id = asset.localIdentifier
@@ -688,8 +946,69 @@ final class InfoPanelView: UIView {
         }
         let albums = albumNames ?? []
         let albumText = albums.isEmpty ? "앨범 없음 (미분류)" : "앨범  " + albums.joined(separator: ", ")
-        stack.addArrangedSubview(card([padded(label(albumText, color: albums.isEmpty ? .secondaryLabel : .label))]))
+        stack.addArrangedSubview(singleRowCard(label(albumText, color: albums.isEmpty ? .secondaryLabel : .label), action: nil))
 
         onContentChange?()
+    }
+}
+
+// MARK: - 날짜·시간 조정 시트
+
+/// 정보 카드의 "조정" → 날짜와 시간을 고르는 시트. "조정" 을 누르면 onSave
+final class DateAdjustViewController: UIViewController {
+    private let original: Date
+    private let picker = UIDatePicker()
+    var onSave: ((Date) -> Void)?
+
+    init(date: Date) {
+        original = date
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemGroupedBackground
+        title = "날짜 및 시간 조정"
+        navigationItem.leftBarButtonItem = UIBarButtonItem(title: "취소", style: .plain, target: self, action: #selector(cancel))
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: "조정", style: .done, target: self, action: #selector(saveTapped))
+
+        let originalLabel = UILabel()
+        originalLabel.text = "원본: " + DateText.long(original)
+        originalLabel.font = .systemFont(ofSize: 15)
+        originalLabel.textColor = .secondaryLabel
+        originalLabel.numberOfLines = 0
+
+        picker.datePickerMode = .dateAndTime
+        picker.preferredDatePickerStyle = .inline
+        picker.locale = Locale(identifier: "ko_KR")
+        picker.date = original
+
+        let stack = UIStackView(arrangedSubviews: [originalLabel, picker])
+        stack.axis = .vertical
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(stack)
+        let guide = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: guide.topAnchor, constant: 16),
+            stack.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+        ])
+    }
+
+    @objc private func cancel() {
+        dismiss(animated: true)
+    }
+
+    @objc private func saveTapped() {
+        let date = picker.date
+        let onSave = self.onSave
+        dismiss(animated: true) {
+            onSave?(date)
+        }
     }
 }

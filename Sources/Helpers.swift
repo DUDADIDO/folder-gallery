@@ -316,14 +316,59 @@ enum Sharer {
     }
 }
 
+/// 확대 전환(iOS 18) 끌기의 위치·속도를 CGPoint 로.
+/// UIZoomTransitionInteractionContext.velocity 가 SDK 에 따라 CGVector 일 수도 CGPoint 일 수도 있어서 둘 다 받음
+enum ZoomGesture {
+    static func point(_ value: CGVector) -> CGPoint { CGPoint(x: value.dx, y: value.dy) }
+    static func point(_ value: CGPoint) -> CGPoint { value }
+
+    /// 분명히 아래로 끄는 중인지 (옆으로 넘기기는 절대 아님)
+    static func isDownward(_ velocity: CGPoint) -> Bool {
+        velocity.y > 0 && velocity.y >= abs(velocity.x) * 1.5
+    }
+}
+
+/// '밀어서 뒤로'를 막고 있는 화면들 (화면마다 따로 기억해서, 한 화면이 풀어도 다른 화면이 막은 건 그대로)
+private final class BackSwipeBlockers {
+    /// 막은 화면(약하게 잡음) → 막은 정도
+    let table = NSMapTable<AnyObject, NSNumber>.weakToStrongObjects()
+}
+
+private var backSwipeBlockersKey: UInt8 = 0
+
 extension UINavigationController {
-    /// '밀어서 뒤로'(가장자리 + iOS 26 의 화면 어디서나)를 켜고 끔
-    func setBackSwipeEnabled(_ enabled: Bool) {
-        interactivePopGestureRecognizer?.isEnabled = enabled
+    enum BackSwipeBlock: Int {
+        /// iOS 26 의 '화면 어디서나 밀어서 뒤로'만 막음 (왼쪽 가장자리에서 밀기는 그대로)
+        case anywhere = 1
+        /// 가장자리 + 어디서나 둘 다 막음
+        case all = 2
+    }
+
+    /// owner 가 '밀어서 뒤로'를 막거나(kind) 풀어 줌(nil). 막은 화면이 하나도 없을 때만 다시 켜짐
+    func setBackSwipe(blocked kind: BackSwipeBlock?, by owner: AnyObject) {
+        let blockers: BackSwipeBlockers
+        if let existing = objc_getAssociatedObject(self, &backSwipeBlockersKey) as? BackSwipeBlockers {
+            blockers = existing
+        } else {
+            blockers = BackSwipeBlockers()
+            objc_setAssociatedObject(self, &backSwipeBlockersKey, blockers, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }
+        if let kind {
+            blockers.table.setObject(NSNumber(value: kind.rawValue), forKey: owner)
+        } else {
+            blockers.table.removeObject(forKey: owner)
+        }
+        var strongest = 0
+        for key in blockers.table.keyEnumerator().allObjects {
+            if let value = blockers.table.object(forKey: key as AnyObject) {
+                strongest = max(strongest, value.intValue)
+            }
+        }
+        interactivePopGestureRecognizer?.isEnabled = strongest < BackSwipeBlock.all.rawValue
         // iOS 26 에만 있는 것이라 예전 SDK 로도 빌드되게 이름으로 찾음
         let contentPop = NSSelectorFromString("interactiveContentPopGestureRecognizer")
         if responds(to: contentPop), let recognizer = perform(contentPop)?.takeUnretainedValue() as? UIGestureRecognizer {
-            recognizer.isEnabled = enabled
+            recognizer.isEnabled = strongest < BackSwipeBlock.anywhere.rawValue
         }
     }
 }

@@ -136,12 +136,12 @@ final class SorterViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // 오른쪽으로 쓸기는 '되돌리기'라서, 밀어서 뒤로 가기는 끔 (나갈 때는 왼쪽 위 뒤로 버튼)
-        navigationController?.setBackSwipeEnabled(false)
+        navigationController?.setBackSwipe(blocked: .all, by: self)
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        navigationController?.setBackSwipeEnabled(true)
+        navigationController?.setBackSwipe(blocked: nil, by: self)
     }
 
     private func configure(_ button: UIButton, title: String, symbol: String, action: Selector) {

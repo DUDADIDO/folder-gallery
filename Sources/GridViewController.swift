@@ -5,12 +5,17 @@ final class AssetCell: UICollectionViewCell {
     static let reuse = "AssetCell"
 
     let imageView = UIImageView()
+    /// 확대 전환이 쓰는 그림 판 (사진 + 길이 글자). 셀 자체는 격자가 자리·변형을 다시 덮어쓰므로 셀 대신 이걸 넘김
+    private let thumbView = UIView()
     private let dim = UIView()
     private let badge = UIImageView()
     private let durationLabel = UILabel()
 
     var assetID: String?
     var requestID: PHImageRequestID = PHInvalidImageRequestID
+
+    /// 확대 전환이 시작하고 돌아올 view
+    var zoomSourceView: UIView { thumbView }
 
     /// 선택 모드인지 (빈 동그라미를 보여 줄지)
     var selecting = false {
@@ -23,12 +28,16 @@ final class AssetCell: UICollectionViewCell {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        thumbView.clipsToBounds = true
+        thumbView.frame = contentView.bounds   // 처음 한 번만 (아직 변형이 없을 때)
+        contentView.addSubview(thumbView)
+
         imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
         imageView.backgroundColor = .secondarySystemBackground
-        imageView.frame = contentView.bounds
+        imageView.frame = thumbView.bounds
         imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        contentView.addSubview(imageView)
+        thumbView.addSubview(imageView)
 
         dim.backgroundColor = UIColor.black.withAlphaComponent(0.28)
         dim.frame = contentView.bounds
@@ -43,15 +52,15 @@ final class AssetCell: UICollectionViewCell {
         durationLabel.layer.shadowRadius = 2
         durationLabel.layer.shadowOffset = .zero
         durationLabel.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(durationLabel)
+        thumbView.addSubview(durationLabel)
 
         badge.translatesAutoresizingMaskIntoConstraints = false
         badge.isHidden = true
         contentView.addSubview(badge)
 
         NSLayoutConstraint.activate([
-            durationLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -5),
-            durationLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            durationLabel.trailingAnchor.constraint(equalTo: thumbView.trailingAnchor, constant: -5),
+            durationLabel.bottomAnchor.constraint(equalTo: thumbView.bottomAnchor, constant: -4),
             badge.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 5),
             badge.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 5),
             badge.widthAnchor.constraint(equalToConstant: 24),
@@ -61,6 +70,16 @@ final class AssetCell: UICollectionViewCell {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // 확대 전환 중에는 시스템이 thumbView 에 변형을 걸 수 있어서 frame 대신 크기와 중심만 (같으면 건드리지 않음)
+        let bounds = contentView.bounds
+        let size = CGRect(origin: .zero, size: bounds.size)
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        if thumbView.bounds != size { thumbView.bounds = size }
+        if thumbView.center != center { thumbView.center = center }
     }
 
     override func prepareForReuse() {
@@ -199,6 +218,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private var layoutAnchor: IndexPath?   // 칸 수를 바꾸는 동안 가운데 남길 사진
     private let columnChoices = [3, 4, 5, 7]
     private var columns = 4
+    /// 화면 전환(확대 전환 포함) 중인지. 이때 온 보관함 변경은 전환이 끝난 뒤에 반영
+    private var transitioning = false
+    private var reloadPending = false
+    /// 선택 모드가 '밀어서 뒤로'를 막을 때 쓰는 이름표 (앨범 화면 자체가 막는 것과 따로)
+    private let selectionSwipeToken = NSObject()
+
+    /// 이 화면이 보여 주는 앨범 ID ("all" = 보관함)
+    var folderID: String { folder.id }
+    /// 앨범 카드에서 확대 전환으로 열린 앨범 화면인지 (여는 쪽에서 정함)
+    var opensWithZoom = false
 
     private lazy var shareItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: self, action: #selector(shareSelected))
     private lazy var moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeMoreMenu())
@@ -283,11 +312,58 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         super.viewWillAppear(animated)
         navigationController?.setNavigationBarHidden(false, animated: animated)
         navigationController?.setToolbarHidden(!selecting, animated: animated)
+        holdReloadsDuringTransition()
+        blockSwipeAnywhereIfAlbum()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // 전환을 취소하고 돌아왔을 때도 다시 막음
+        blockSwipeAnywhereIfAlbum()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        holdReloadsDuringTransition()
+        navigationController?.setBackSwipe(blocked: nil, by: self)
+        // 선택 모드인 채로 닫히면(앨범이 지워짐 등) 뒤 화면에 막힌 채로 남지 않게
+        if isMovingFromParent { navigationController?.setBackSwipe(blocked: nil, by: selectionSwipeToken) }
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         if selecting { setSelecting(false) }
+    }
+
+    /// 앨범 화면(카드에서 확대 전환으로 열림)에서는 iOS 26 의 '어디서나 밀어서 뒤로'를 끔.
+    /// 격자 한가운데를 옆으로 쓸어도 닫히지 않게. 왼쪽 가장자리에서 밀기와 위에서 아래로 끌기는 그대로
+    private func blockSwipeAnywhereIfAlbum() {
+        guard opensWithZoom, navigationController?.topViewController === self else { return }
+        navigationController?.setBackSwipe(blocked: .anywhere, by: self)
+    }
+
+    /// 화면 전환이 진행 중이면 끝날 때까지 다시 그리기를 미룸 (확대 전환이 잡고 있는 칸이 바뀌거나 다시 배치되지 않게)
+    private func holdReloadsDuringTransition() {
+        guard let coordinator = transitionCoordinator else { return }
+        transitioning = true
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            guard let self else { return }
+            self.transitioning = false
+            if self.reloadPending {
+                self.reloadPending = false
+                self.reloadFromLibrary(force: false)
+            }
+        }
+    }
+
+    /// 앨범 화면을 닫는 확대 전환을 시작해도 되는지. 왼쪽 가장자리에서 오른쪽으로 밀기, 또는 맨 위에서 아래로 끌기만.
+    /// (가운데를 옆으로 쓸기는 안 됨)
+    func allowsZoomDismiss(location: CGPoint, velocity: CGPoint) -> Bool {
+        if selecting { return false }
+        if location.x <= 44 && velocity.x > 0 && velocity.x > abs(velocity.y) { return true }
+        guard ZoomGesture.isDownward(velocity), isViewLoaded, collectionView != nil else { return false }
+        let top = -collectionView.adjustedContentInset.top
+        return collectionView.contentOffset.y <= top + 1
     }
 
     @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
@@ -368,6 +444,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     // MARK: - 데이터
 
     @objc private func libraryChanged() {
+        if transitioning {
+            reloadPending = true
+            return
+        }
         reloadFromLibrary(force: false)
     }
 
@@ -446,27 +526,38 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         isRoot || Prefs.newestFirstAlbums.contains(folder.id)
     }
 
-    /// 앨범 카드에서 열리고 닫히는 확대 전환이 맞출 자리: 맨 위 정사각형 표지 (이 화면 좌표)
+    /// 앨범 카드에서 열리고 닫히는 확대 전환이 맞출 자리: 화면 맨 위의 정사각형 (이 화면 좌표).
+    /// 표지의 스크롤 위치를 따라가지 않음 — 따라가면 위로 넘겨 둔 격자에서는 화면 밖 자리가 되고,
+    /// 맨 위에서 당겨 늘어나는(고무줄) 동안에는 매 순간 자리가 바뀌어 전환 끝에서 튐.
+    /// 맨 위에 있을 때는 표지와 정확히 같은 자리라 열릴 때는 그대로 표지에 맞음
     func zoomCoverRect() -> CGRect {
-        var width = isViewLoaded ? view.bounds.width : 0
-        if width <= 0 { width = navigationController?.view.bounds.width ?? 0 }
-        var rect = CGRect(x: 0, y: 0, width: width, height: width)
-        if isViewLoaded, collectionView != nil, !isRoot, !sections.isEmpty,
-           let attributes = collectionView.layoutAttributesForSupplementaryElement(ofKind: UICollectionView.elementKindSectionHeader,
-                                                                                  at: IndexPath(item: 0, section: 0)) {
-            rect = collectionView.convert(attributes.frame, to: view)
-        }
-        return rect
+        var size = isViewLoaded ? view.bounds.size : .zero
+        if size.width <= 0 { size = navigationController?.view.bounds.size ?? .zero }
+        let side = min(size.width, size.height > 0 ? size.height : size.width)
+        return CGRect(x: 0, y: 0, width: size.width, height: side)
     }
 
-    /// 확대 전환이 시작하고 돌아올 자리 (그 사진의 칸). 화면 밖이면 nil
+    /// 확대 전환이 시작하고 돌아올 자리 (그 사진 칸의 그림 판). 화면 밖이면 nil
     private func thumbnailView(forAssetID id: String) -> UIView? {
         guard let flat = assetIDs.firstIndex(of: id) else { return nil }
         for (section, entry) in sections.enumerated() where entry.range.contains(flat) {
             let path = IndexPath(item: flat - entry.range.lowerBound, section: section)
-            return collectionView.cellForItem(at: path)
+            return (collectionView.cellForItem(at: path) as? AssetCell)?.zoomSourceView
         }
         return nil
+    }
+
+    /// '모든 사진에서 보기': 그 사진이 화면 가운데 오게 스크롤 (보관함 탭에서 씀)
+    func reveal(assetID id: String) {
+        loadViewIfNeeded()
+        if selecting { setSelecting(false) }
+        if !assetIDs.contains(id) { reloadFromLibrary(force: false) }
+        guard let flat = assetIDs.firstIndex(of: id),
+              let section = sections.firstIndex(where: { $0.range.contains(flat) }) else { return }
+        let path = IndexPath(item: flat - sections[section].range.lowerBound, section: section)
+        view.layoutIfNeeded()
+        collectionView.layoutIfNeeded()
+        collectionView.scrollToItem(at: path, at: .centeredVertically, animated: false)
     }
 
     private func flatIndex(_ indexPath: IndexPath) -> Int {
@@ -608,9 +699,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             viewer.fallbackBounds = view.bounds
             if #available(iOS 18.0, *) {
                 let options = UIViewController.Transition.ZoomOptions()
-                // 정보 칸이 떠 있거나 확대 중일 때는 끌어내려 닫기를 막음
-                options.interactiveDismissShouldBegin = { [weak viewer] _ in
-                    viewer?.allowsInteractiveDismiss ?? true
+                // 분명히 아래로 끌 때만 닫기 시작 (옆으로 빨리 넘기는 것이 닫기로 잡히지 않게).
+                // 정보 칸이 떠 있거나 확대 중일 때도 막음
+                options.interactiveDismissShouldBegin = { [weak viewer] context in
+                    guard let viewer else { return false }
+                    return viewer.allowsInteractiveDismiss(location: ZoomGesture.point(context.location),
+                                                           velocity: ZoomGesture.point(context.velocity))
                 }
                 // 흰 화면 전체가 아니라 사진이 보이는 자리만 썸네일과 맞춤. 뒤의 격자는 어둡게 하지 않음
                 // (바탕은 보기 화면이 스스로 서서히 나타나고 사라지게 함)
@@ -675,8 +769,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if #available(iOS 18.0, *) {
             tabBarController?.setTabBarHidden(on, animated: true)
         }
-        // 옆으로 끌어 선택하는 동안 '밀어서 뒤로'가 잡히지 않게
-        navigationController?.setBackSwipeEnabled(!on)
+        // 옆으로 끌어 선택하는 동안 '밀어서 뒤로'가 잡히지 않게 (보기 화면·앨범 화면이 막는 것과는 따로 기억)
+        navigationController?.setBackSwipe(blocked: on ? UINavigationController.BackSwipeBlock.all : nil, by: selectionSwipeToken)
         navigationController?.setToolbarHidden(!on, animated: true)
         updateChrome()
     }

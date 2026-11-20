@@ -40,8 +40,10 @@ final class PlayerView: UIView {
 /// 정보를 열면 사진이 위쪽을 꽉 채우고 그 아래에 정보 카드가 이어져 한 장처럼 위아래로 스크롤됨.
 /// (이 화면의 맨 바깥 view 는 움직이지 않음. 움직이는 건 안쪽의 우리 view 들뿐)
 final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
-    let asset: PHAsset
+    private(set) var asset: PHAsset
     var onSingleTap: (() -> Void)?
+    /// 정보 카드 안의 버튼·줄을 눌렀을 때
+    var onInfoAction: ((InfoAction) -> Void)?
     /// 정보를 연 채 맨 위에서 아래로 당겼을 때 (정보 닫기)
     var onInfoPullDown: (() -> Void)?
     /// 영상 상태가 바뀜 (불러옴 · 재생 · 멈춤 · 끝)
@@ -244,7 +246,7 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
         var contentHeight = bounds.height
         if let panel = infoPanel {
             let height = panelHeight ?? measurePanel(width: bounds.width)
-            let finalY = top.maxY + 14
+            let finalY = top.maxY + InfoPanelView.cardSpacing
             let y = bounds.height + (finalY - bounds.height) * progress
             panel.frame = CGRect(x: 0, y: y, width: bounds.width, height: height)
             panel.alpha = min(1, progress * 1.4)
@@ -302,8 +304,18 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
             self.panelHeight = nil
             self.view.setNeedsLayout()
         }
+        panel.onAction = { [weak self] action in
+            self?.onInfoAction?(action)
+        }
         pageScroll.addSubview(panel)
         infoPanel = panel
+    }
+
+    /// 같은 사진의 새 값으로 바꿈 (날짜 조정 등. 그림은 그대로)
+    func replaceAsset(_ fresh: PHAsset) {
+        guard fresh.localIdentifier == asset.localIdentifier else { return }
+        asset = fresh
+        infoPanel?.update(asset: fresh)
     }
 
     /// 넘기고 남은 화면을 원래대로
@@ -1148,6 +1160,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        // 보는 동안은 '밀어서 뒤로'(가장자리·어디서나)를 끔. 옆으로 빨리 넘기는 것이 뒤로 가기로 잡히지 않게
+        navigationController?.setBackSwipe(blocked: .all, by: self)
         // 다른 화면에서 돌아올 때도 숨김 상태를 그대로
         navigationController?.setNavigationBarHidden(chromeHidden || infoShown, animated: animated)
         navigationController?.setToolbarHidden(chromeHidden, animated: animated)
@@ -1167,6 +1181,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // 닫다가 취소했을 때도 다시 끔 (그사이 뒤 화면이 풀었을 수 있음)
+        navigationController?.setBackSwipe(blocked: .all, by: self)
         observePaging()
         // 닫다가 취소했을 때 남은 변형을 지움
         if !infoShown { currentPage?.setDismissDrag(.identity) }
@@ -1177,6 +1193,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        // 떠날 때(닫힘·다른 화면을 엶) 다시 켬. 닫기를 취소하면 viewDidAppear 에서 다시 끔
+        navigationController?.setBackSwipe(blocked: nil, by: self)
         guard isMovingFromParent else { return }
         navigationController?.setNavigationBarHidden(false, animated: animated)
         navigationController?.setToolbarHidden(true, animated: animated)
@@ -1215,10 +1233,19 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     /// 지금 보고 있는 사진 (확대 전환이 돌아갈 칸을 찾는 데 씀)
     var visibleAssetID: String { currentID }
 
-    /// 시스템의 '끌어내려 닫기'를 해도 되는지
-    var allowsInteractiveDismiss: Bool {
+    /// 시스템(확대 전환)의 '끌어내려 닫기'를 시작해도 되는지. location·velocity 는 끌기의 위치(이 화면 좌표)와 속도.
+    /// 분명히 아래로 끌 때만 — 옆으로 넘기기(빠르게 연달아 넘기는 것 포함)는 절대 닫기가 아님
+    func allowsInteractiveDismiss(location: CGPoint, velocity: CGPoint) -> Bool {
         if infoShown || infoProgress > 0 { return false }
         if let page = currentPage, page.isZoomed { return false }
+        guard ZoomGesture.isDownward(velocity) else { return false }
+        guard isViewLoaded else { return true }
+        // 옆으로 넘기는 중(손가락을 떼고 미끄러지는 중 포함)이면 아님
+        if let scroll = pagingScrollView, scroll.isDragging || scroll.isDecelerating { return false }
+        // 썸네일 줄·영상 막대 위에서 시작한 끌기는 그 막대의 것
+        for bar in [scrubber, videoControls] as [UIView] where !bar.isHidden && bar.alpha > 0.01 {
+            if bar.frame.insetBy(dx: 0, dy: -8).contains(location) { return false }
+        }
         return true
     }
 
@@ -1239,6 +1266,10 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         let page = AssetPageViewController(asset: asset, liveEnabled: !Prefs.liveOffAssets.contains(asset.localIdentifier))
         page.onSingleTap = { [weak self] in self?.tapped() }
         page.onInfoPullDown = { [weak self] in self?.setInfo(false, animated: true) }
+        page.onInfoAction = { [weak self, weak page] action in
+            guard let self, let page else { return }
+            self.handleInfoAction(action, page: page)
+        }
         return page
     }
 
@@ -1585,6 +1616,97 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         }
         scrubber.assets = assets
         pageDidChange(animated: false)
+    }
+
+    // MARK: - 정보 카드의 버튼
+
+    private func handleInfoAction(_ action: InfoAction, page: AssetPageViewController) {
+        switch action {
+        case .adjustDate:
+            adjustDate(of: page)
+        case .openPlace:
+            openInMaps(page.asset)
+        case .openSource(let folderID):
+            openAlbum(folderID)
+        case .showInLibrary:
+            showInLibrary(page.asset.localIdentifier)
+        }
+    }
+
+    /// 날짜·시간 조정 (사진 보관함에 바로 반영. iOS 가 확인 창을 띄움)
+    private func adjustDate(of page: AssetPageViewController) {
+        let asset = page.asset
+        let sheet = DateAdjustViewController(date: asset.creationDate ?? Date())
+        sheet.onSave = { [weak self, weak page] date in
+            Library.shared.setCreationDate(asset, date) { ok in
+                guard let self else { return }
+                guard ok else {
+                    self.toast("날짜를 바꾸지 못했어요")
+                    return
+                }
+                // PHAsset 은 바뀌지 않는 값이라 새로 받아 옴
+                let id = asset.localIdentifier
+                guard let fresh = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else { return }
+                if let at = self.indexByID[id], at < self.assets.count { self.assets[at] = fresh }
+                page?.replaceAsset(fresh)
+                if id == self.currentID { self.updateTitle() }
+            }
+        }
+        let nav = UINavigationController(rootViewController: sheet)
+        if let presentation = nav.sheetPresentationController {
+            presentation.detents = [.large()]
+            presentation.prefersGrabberVisible = true
+        }
+        present(nav, animated: true)
+    }
+
+    /// 찍은 자리를 지도 앱에서 (장소 이름이 있으면 그 이름으로 핀)
+    private func openInMaps(_ asset: PHAsset) {
+        guard let location = asset.location else { return }
+        let coordinate = location.coordinate
+        var components = URLComponents(string: "https://maps.apple.com/")
+        var items = [URLQueryItem(name: "ll", value: String(format: "%.6f,%.6f", coordinate.latitude, coordinate.longitude))]
+        if let name = PlaceNames.shared.cachedName(location) {
+            items.append(URLQueryItem(name: "q", value: name))
+        }
+        components?.queryItems = items
+        guard let url = components?.url else { return }
+        UIApplication.shared.open(url)
+    }
+
+    /// 저장한 앱의 자동 분류 앨범을 이 위에 엶
+    private func openAlbum(_ folderID: String) {
+        guard let folder = Library.shared.snapshot.folders.first(where: { $0.id == folderID }),
+              !Prefs.hiddenAlbums.contains(folderID) else { return }
+        navigationController?.pushViewController(GridViewController(folder: folder), animated: true)
+    }
+
+    /// '모든 사진에서 보기': 보관함 탭으로 가서 그 사진이 보이게 스크롤하고 이 화면은 닫음
+    private func showInLibrary(_ id: String) {
+        guard let tabs = tabBarController,
+              let libraryNav = tabs.viewControllers?.compactMap({ $0 as? UINavigationController }).first(where: {
+                  ($0.viewControllers.first as? GridViewController)?.folderID == "all"
+              }),
+              let library = libraryNav.viewControllers.first as? GridViewController else { return }
+        if infoShown { setInfo(false, animated: false) }
+        guard let ownNav = navigationController else { return }
+        if ownNav === libraryNav {
+            // 보관함 탭에서 연 사진: 격자를 그 사진 자리로 옮겨 둔 뒤 닫아서 그 칸으로 줄어들며 돌아감
+            library.reveal(assetID: id)
+            ownNav.popToViewController(library, animated: ownNav.viewControllers.count == 2)
+            return
+        }
+        // 다른 탭에서 연 사진: 이 화면만 닫고 보관함 탭으로
+        if ownNav.topViewController === self {
+            ownNav.popViewController(animated: false)
+        }
+        libraryNav.popToRootViewController(animated: false)
+        if let index = tabs.viewControllers?.firstIndex(where: { $0 === libraryNav }) {
+            tabs.selectedIndex = index
+        }
+        // 코드로 탭을 바꾸면 tabBarController(_:didSelect:) 가 안 불려서 직접 알림 (숨긴 앨범 탭 다시 잠금 등)
+        tabs.delegate?.tabBarController?(tabs, didSelect: libraryNav)
+        library.reveal(assetID: id)
     }
 
     // MARK: - 막대 버튼

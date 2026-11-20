@@ -39,9 +39,26 @@ final class AlbumCell: UICollectionViewCell {
     /// 확대 전환이 시작하고 돌아올 둥근 카드 (모서리가 둥글어야 닫힐 때 네모 귀퉁이가 안 보임)
     var cardView: UIView { card }
 
-    /// 꾹 눌렀을 때·끌 때 떠오르는 모양 (카드의 둥근 모서리 그대로)
+    /// 꾹 눌렀을 때·끌 때 떠오르는 모양 (카드의 둥근 모서리 그대로).
+    /// card.frame 은 변형이 걸려 있으면 믿을 수 없어서 크기와 중심으로 셈
     var liftPath: UIBezierPath {
-        UIBezierPath(roundedRect: card.frame, cornerRadius: card.layer.cornerRadius)
+        let size = card.bounds.size
+        let rect = CGRect(x: card.center.x - size.width / 2, y: card.center.y - size.height / 2,
+                          width: size.width, height: size.height)
+        return UIBezierPath(roundedRect: rect, cornerRadius: card.layer.cornerRadius)
+    }
+
+    /// card 를 rect(contentView 좌표)에 놓음. 확대 전환이 card 에 변형을 걸고 있어도 안전하게
+    /// frame 대신 크기와 중심만, 그것도 바뀌었을 때만 씀
+    private func setCardCorner(_ radius: CGFloat) {
+        if card.layer.cornerRadius != radius { card.layer.cornerRadius = radius }
+    }
+
+    private func placeCard(_ rect: CGRect) {
+        let bounds = CGRect(origin: .zero, size: rect.size)
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        if card.bounds != bounds { card.bounds = bounds }
+        if card.center != center { card.center = center }
     }
 
     override init(frame: CGRect) {
@@ -152,11 +169,13 @@ final class AlbumCell: UICollectionViewCell {
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
 
+        // 이 칸의 card 는 확대 전환의 출발·도착 view 라서, 전환 중에 이 배치가 돌아도 card 를 흔들지 않게
+        // card 자체는 placeCard(크기+중심, 바뀐 것만)로만, 모서리도 바뀌었을 때만 씀. 안쪽 view 는 card 안 좌표로
         let bounds = contentView.bounds
         switch style {
         case .card:
-            card.frame = bounds
-            card.layer.cornerRadius = 26
+            placeCard(bounds)
+            setCardCorner(26)
             contentView.layer.shadowOpacity = 0.08
             separator.isHidden = true
             countIcon.isHidden = true
@@ -183,7 +202,7 @@ final class AlbumCell: UICollectionViewCell {
                 // 사진이 카드 전체, 아래에 흰 이름
                 card.backgroundColor = .systemGray5
                 coverView.isHidden = false
-                coverView.frame = bounds
+                coverView.frame = CGRect(origin: .zero, size: bounds.size)
                 for tile in tiles {
                     tile.isHidden = true
                 }
@@ -196,8 +215,8 @@ final class AlbumCell: UICollectionViewCell {
         case .row:
             contentView.layer.shadowOpacity = 0
             let side = bounds.height - 16
-            card.frame = CGRect(x: 0, y: 8, width: side, height: side)
-            card.layer.cornerRadius = 16
+            placeCard(CGRect(x: 0, y: 8, width: side, height: side))
+            setCardCorner(16)
             shade.isHidden = true
             separator.isHidden = false
             separator.frame = CGRect(x: 0, y: bounds.height - 0.5, width: bounds.width, height: 0.5)
@@ -215,7 +234,7 @@ final class AlbumCell: UICollectionViewCell {
             } else {
                 card.backgroundColor = .systemGray5
                 coverView.isHidden = false
-                coverView.frame = card.bounds
+                coverView.frame = CGRect(x: 0, y: 0, width: side, height: side)
                 for tile in tiles {
                     tile.isHidden = true
                 }
@@ -296,6 +315,9 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
     private var messageAction: (() -> Void)?
     private var warnedLimited = false
     private var thumbSize = CGSize(width: 500, height: 500)
+    /// 화면 전환(확대 전환 포함) 중인지. 이때 온 변경은 끝난 뒤에 반영
+    private var transitioning = false
+    private var reloadPending = false
 
     // 숨긴 앨범 탭 잠금
     private var unlocked = false
@@ -363,7 +385,33 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         super.viewWillAppear(animated)
         navigationController?.setNavigationBarHidden(false, animated: animated)
         navigationController?.setToolbarHidden(true, animated: animated)
-        reload(force: false)
+        // 앨범 화면이 카드로 줄어들며 닫히는 중에는 다시 그리지 않음 (전환이 잡고 있는 카드가 바뀌거나 다시 배치되면
+        // 끝에서 카드가 커졌다가 덜컥 돌아옴). 전환이 끝나면 그때 반영
+        if holdReloadsDuringTransition() {
+            reloadPending = true
+        } else {
+            reload(force: false)
+        }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        _ = holdReloadsDuringTransition()
+    }
+
+    /// 화면 전환이 진행 중이면 끝날 때까지 보관함 변경 반영을 미룸. 미루기 시작했으면 true
+    private func holdReloadsDuringTransition() -> Bool {
+        guard let coordinator = transitionCoordinator else { return false }
+        transitioning = true
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            guard let self else { return }
+            self.transitioning = false
+            if self.reloadPending {
+                self.reloadPending = false
+                self.reload(force: false)
+            }
+        }
+        return true
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -511,6 +559,10 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
     // MARK: - 데이터
 
     @objc private func libraryChanged() {
+        if transitioning {
+            reloadPending = true
+            return
+        }
         reload(force: false)
     }
 
@@ -746,8 +798,15 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
             let options = UIViewController.Transition.ZoomOptions()
             // 카드(정사각형)를 앨범 화면 맨 위의 정사각형 표지에 맞춤. 닫힐 때 끝에서 크기가 덜컥 바뀌지 않게
             if let grid = next as? GridViewController {
+                grid.opensWithZoom = true
                 options.alignmentRectProvider = { [weak grid] _ in
                     grid?.zoomCoverRect() ?? .zero
+                }
+                // 닫기는 왼쪽 가장자리에서 밀기 또는 맨 위에서 아래로 끌기만 (격자 가운데를 옆으로 쓸면 안 닫힘)
+                options.interactiveDismissShouldBegin = { [weak grid] context in
+                    guard let grid else { return false }
+                    return grid.allowsZoomDismiss(location: ZoomGesture.point(context.location),
+                                                  velocity: ZoomGesture.point(context.velocity))
                 }
             }
             next.preferredTransition = .zoom(options: options, sourceViewProvider: { [weak self] _ in

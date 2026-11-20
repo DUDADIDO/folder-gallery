@@ -325,6 +325,11 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         change({ PHAssetChangeRequest(for: asset).isFavorite = on }, completion: completion)
     }
 
+    /// 찍은 날짜·시간 바꾸기 (정보 화면의 '조정'). iOS 가 확인 창을 한 번 띄움
+    func setCreationDate(_ asset: PHAsset, _ date: Date, completion: ((Bool) -> Void)? = nil) {
+        change({ PHAssetChangeRequest(for: asset).creationDate = date }, completion: completion)
+    }
+
     /// 앨범 만들기. container 가 폴더면 그 안에 만듦
     func createAlbum(title: String, in container: String = Snapshot.top, adding assets: [PHAsset] = [],
                      from source: PHAssetCollection? = nil, completion: ((Bool) -> Void)? = nil) {
