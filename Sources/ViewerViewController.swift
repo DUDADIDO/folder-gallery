@@ -2208,6 +2208,16 @@ final class SlideshowViewController: UIViewController {
     }
 
     @objc private func close() {
-        dismiss(animated: true)
+        let presenter = presentingViewController
+        dismiss(animated: true) {
+            // 검은 화면의 흰 상태 막대가 남지 않게 뒤 화면 기준으로 다시 맞춤
+            var screen = presenter
+            while let current = screen {
+                current.setNeedsStatusBarAppearanceUpdate()
+                screen = (current as? UITabBarController)?.selectedViewController
+                    ?? (current as? UINavigationController)?.topViewController
+                if screen === current { break }
+            }
+        }
     }
 }
