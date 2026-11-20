@@ -1046,7 +1046,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         }
     }
 
-    override var prefersStatusBarHidden: Bool { infoShown }
+    /// 정보를 볼 때와, 탭해서 막대를 숨겨 검은 바탕일 때 (순정처럼 시간·배터리도 숨김)
+    override var prefersStatusBarHidden: Bool { infoShown || chromeHidden }
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { .fade }
 
     override func viewDidLoad() {
@@ -1622,6 +1623,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         chromeHidden = hidden
         navigationController?.setNavigationBarHidden(hidden, animated: animated)
         let changes = {
+            self.setNeedsStatusBarAppearanceUpdate()
             self.backdrop.backgroundColor = self.chromeHidden ? .black : .systemBackground
             self.applyChromeAlpha()
             // 아래 막대만큼 올려 둔 안전 영역도 같이 (썸네일 줄이 따라 내려가고 올라옴)
@@ -1902,7 +1904,34 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             openAlbum(folderID)
         case .showInLibrary:
             showInLibrary(page.asset.localIdentifier)
+        case .addLocation:
+            addLocation(to: page)
         }
+    }
+
+    /// 위치가 없는 사진에 장소 넣기 (장소를 찾아 고르면 사진 보관함에 바로 반영. iOS 가 확인 창을 띄움)
+    private func addLocation(to page: AssetPageViewController) {
+        let asset = page.asset
+        let sheet = LocationSearchViewController()
+        sheet.onPick = { [weak self, weak page] location in
+            Library.shared.setLocation(asset, location) { ok in
+                guard let self else { return }
+                guard ok else {
+                    self.toast("위치를 넣지 못했어요")
+                    return
+                }
+                let id = asset.localIdentifier
+                guard let fresh = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else { return }
+                self.freshAssets[id] = fresh
+                page?.replaceAsset(fresh)
+            }
+        }
+        let nav = UINavigationController(rootViewController: sheet)
+        if let presentation = nav.sheetPresentationController {
+            presentation.detents = [.large()]
+            presentation.prefersGrabberVisible = true
+        }
+        present(nav, animated: true)
     }
 
     /// 날짜·시간 조정 (사진 보관함에 바로 반영. iOS 가 확인 창을 띄움)

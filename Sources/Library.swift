@@ -672,6 +672,11 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         change({ PHAssetChangeRequest(for: asset).creationDate = date }, completion: completion)
     }
 
+    /// 찍은 자리 바꾸기 (정보의 "위치 추가…")
+    func setLocation(_ asset: PHAsset, _ location: CLLocation, completion: ((Bool) -> Void)? = nil) {
+        change({ PHAssetChangeRequest(for: asset).location = location }, completion: completion)
+    }
+
     /// 앨범 만들기. container 가 폴더면 그 안에 만듦
     func createAlbum(title: String, in container: String = Snapshot.top, adding assets: [PHAsset] = [],
                      from source: PHAssetCollection? = nil, completion: ((Bool) -> Void)? = nil) {

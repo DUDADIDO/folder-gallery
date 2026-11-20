@@ -394,6 +394,8 @@ enum InfoAction {
     case openSource(String)
     /// 보관함 탭에서 이 사진 보기
     case showInLibrary
+    /// 위치가 없는 사진에 장소 넣기
+    case addLocation
 }
 
 /// 누를 수 있는 줄 (누르는 동안 살짝 어두워짐)
@@ -741,12 +743,13 @@ final class InfoPanelView: UIView {
         row.axis = .horizontal
         row.distribution = .fillEqually
         var labels: [UILabel] = []
-        for (index, value) in values.enumerated() {
+        for value in values {
             let item = label(value, size: 13, color: .secondaryLabel)
             item.numberOfLines = 1
             item.adjustsFontSizeToFitWidth = true
             item.minimumScaleFactor = 0.7
-            item.textAlignment = index == 0 ? .left : (index == values.count - 1 ? .right : .center)
+            // 순정처럼 다섯 칸 모두 칸 가운데에
+            item.textAlignment = .center
             row.addArrangedSubview(item)
             labels.append(item)
         }
@@ -819,7 +822,7 @@ final class InfoPanelView: UIView {
         header.axis = .vertical
         header.spacing = 2
         let dateText = asset.creationDate.map { DateText.long($0) } ?? "날짜 없음"
-        let dateLabel = label(dateText, weight: .semibold)
+        let dateLabel = label(dateText)
         let dateLine = UIStackView(arrangedSubviews: [dateLabel])
         dateLine.axis = .horizontal
         dateLine.alignment = .firstBaseline
@@ -883,14 +886,22 @@ final class InfoPanelView: UIView {
         let lensColumn = UIStackView()
         lensColumn.axis = .vertical
         lensColumn.spacing = 4
-        if !isVideo, let details, let lens = DetailsLoader.lensText(details) {
-            lensColumn.addArrangedSubview(label(lens, size: 15, color: .secondaryLabel))
+        if !isVideo, let details {
+            if let lens = DetailsLoader.lensText(details) {
+                lensColumn.addArrangedSubview(label(lens, size: 15, color: .secondaryLabel))
+            } else if !isScreenshot {
+                lensColumn.addArrangedSubview(label("렌즈 정보 없음", size: 15, color: .secondaryLabel))
+            }
         }
         lensColumn.addArrangedSubview(label(sizeParts.joined(separator: " • "), size: 15, color: .secondaryLabel))
         rows.append(padded(lensColumn, vertical: 14))
 
-        if !isVideo, let details, let values = DetailsLoader.exifValues(details) {
-            rows.append(exifRow(values))
+        if !isVideo, let details {
+            if let values = DetailsLoader.exifValues(details) {
+                rows.append(exifRow(values))
+            } else if !isScreenshot {
+                rows.append(exifRow(Array(repeating: "-", count: 5)))
+            }
         }
         stack.addArrangedSubview(card(rows))
 
@@ -911,6 +922,12 @@ final class InfoPanelView: UIView {
             placeRow.spacing = 6
             let row = TapRow(content: placeRow, vertical: 12) { [weak self] in self?.onAction?(.openPlace) }
             stack.addArrangedSubview(card([mapView(), row], separators: false))
+        }
+
+        if asset.location == nil, asset.canPerform(.properties) {
+            stack.addArrangedSubview(singleRowCard(label("위치 추가…", color: .systemBlue)) { [weak self] in
+                self?.onAction?(.addLocation)
+            })
         }
 
         // 3) 어디서 저장됐는지: "[앱 이름(굵게)]에서 저장됨 ›" (앱 아이콘은 공개 API 로 못 얻어서 뺌)
@@ -1024,6 +1041,101 @@ final class DateAdjustViewController: UIViewController {
         let onSave = self.onSave
         dismiss(animated: true) {
             onSave?(date)
+        }
+    }
+}
+
+// MARK: - 위치 추가 시트 (순정처럼: 장소를 검색해서 고름)
+
+final class LocationSearchViewController: UITableViewController, UISearchResultsUpdating, MKLocalSearchCompleterDelegate {
+    var onPick: ((CLLocation) -> Void)?
+    private let completer = MKLocalSearchCompleter()
+    private var results: [MKLocalSearchCompletion] = []
+    private let search = UISearchController(searchResultsController: nil)
+    private var searching = false
+
+    init() {
+        super.init(style: .insetGrouped)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "위치 추가"
+        navigationItem.leftBarButtonItem = UIBarButtonItem(title: "취소", style: .plain, target: self, action: #selector(cancel))
+        search.searchResultsUpdater = self
+        search.obscuresBackgroundDuringPresentation = false
+        search.searchBar.placeholder = "위치 검색"
+        navigationItem.searchController = search
+        navigationItem.hidesSearchBarWhenScrolling = false
+        completer.delegate = self
+        completer.resultTypes = [.address, .pointOfInterest]
+        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "place")
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // 바로 입력할 수 있게
+        DispatchQueue.main.async { self.search.searchBar.becomeFirstResponder() }
+    }
+
+    @objc private func cancel() {
+        dismiss(animated: true)
+    }
+
+    func updateSearchResults(for searchController: UISearchController) {
+        let text = searchController.searchBar.text?.trimmingCharacters(in: .whitespaces) ?? ""
+        if text.isEmpty {
+            results = []
+            tableView.reloadData()
+        } else {
+            completer.queryFragment = text
+        }
+    }
+
+    func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
+        results = completer.results
+        tableView.reloadData()
+    }
+
+    func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
+        results = []
+        tableView.reloadData()
+    }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        results.count
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let cell = tableView.dequeueReusableCell(withIdentifier: "place", for: indexPath)
+        var content = UIListContentConfiguration.subtitleCell()
+        let result = results[indexPath.row]
+        content.text = result.title
+        content.secondaryText = result.subtitle
+        content.secondaryTextProperties.color = .secondaryLabel
+        content.image = UIImage(systemName: "mappin.circle.fill")
+        content.imageProperties.tintColor = .systemRed
+        cell.contentConfiguration = content
+        return cell
+    }
+
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        guard !searching else { return }
+        searching = true
+        let request = MKLocalSearch.Request(completion: results[indexPath.row])
+        MKLocalSearch(request: request).start { [weak self] response, _ in
+            guard let self else { return }
+            self.searching = false
+            guard let coordinate = response?.mapItems.first?.placemark.coordinate else { return }
+            let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            let onPick = self.onPick
+            self.search.isActive = false
+            self.dismiss(animated: true) { onPick?(location) }
         }
     }
 }
