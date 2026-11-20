@@ -7,6 +7,11 @@ import UIKit
 /// (시스템 확대 전환은 보기 화면 전체를 둥근 카드처럼 키우고 줄여서 이 화면에는 쓰지 않음)
 enum PhotoTransition {
     static let duration: TimeInterval = 0.3
+    /// 열 때 사진이 커지는 스프링 길이 (감쇠 1, 앞쪽에 몰리지 않게 springDuration 으로)
+    static let openFlightDuration: TimeInterval = 0.3
+    /// 열 때 뒤 격자가 사라지기 시작하는 때와 걸리는 시간
+    static let openFadeDelay: TimeInterval = 0.08
+    static let openFadeDuration: TimeInterval = 0.2
 
     /// 우리 전환을 쓰는 경우: 격자에서 보기 화면을 열 때와 보기 화면에서 격자로 닫을 때만
     static func handles(_ operation: UINavigationController.Operation, from: UIViewController, to: UIViewController) -> Bool {
@@ -123,6 +128,10 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
             apply(progress: opening ? 0 : 1)
             placeFlight(opening ? (thumbRect ?? fittedRect) : fittedRect, cropped: opening && thumbRect != nil)
         }
+        if opening, flight != nil {
+            animateOpening(transitionContext)
+            return
+        }
         // 순정처럼 짧게 (움직임이 보이는 건 0.2초 남짓), 튀지 않게 감쇠 1
         UIView.animate(withDuration: PhotoTransition.duration, delay: 0, usingSpringWithDamping: 1, initialSpringVelocity: 0,
                        options: [], animations: {
@@ -137,6 +146,26 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         }, completion: { _ in
             self.finish(completed: !transitionContext.transitionWasCancelled)
         })
+    }
+
+    /// 격자에서 사진을 열 때 (iOS 27 순정 녹화와 맞춤):
+    /// 사진은 앞쪽에 몰리지 않는 스프링으로 0.2초 남짓에 걸쳐 커지고,
+    /// 뒤의 격자는 처음엔 그대로 보이다가 0.1초 뒤부터 사라짐 (바탕·막대가 함께 나타남)
+    private func animateOpening(_ transitionContext: UIViewControllerContextTransitioning) {
+        let group = DispatchGroup()
+        group.enter()
+        UIView.animate(springDuration: PhotoTransition.openFlightDuration, bounce: 0, initialSpringVelocity: 0,
+                       delay: 0, options: [], animations: {
+            self.placeFlight(self.fittedRect, cropped: false)
+        }, completion: { _ in group.leave() })
+        group.enter()
+        UIView.animate(withDuration: PhotoTransition.openFadeDuration, delay: PhotoTransition.openFadeDelay,
+                       options: [.curveEaseInOut], animations: {
+            self.apply(progress: 1)
+        }, completion: { _ in group.leave() })
+        group.notify(queue: .main) {
+            self.finish(completed: !transitionContext.transitionWasCancelled)
+        }
     }
 
     // MARK: - 끌어서 닫기 (손가락을 따라감)
