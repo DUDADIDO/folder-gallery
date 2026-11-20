@@ -52,7 +52,8 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
     /// 영상 상태가 바뀜 (불러옴 · 재생 · 멈춤 · 끝)
     var onPlaybackChange: (() -> Void)?
     /// 영상 소리 끔 (보기 화면을 닫아도 앱이 켜져 있는 동안 기억)
-    static var videoMuted = false
+    /// 순정처럼 처음엔 소리 없이 재생. 한 번 켜면 앱을 끌 때까지 켜진 채로
+    static var videoMuted = true
 
     private let pageScroll = UIScrollView()   // 정보 모드에서 사진 + 정보를 한 장으로 세로 스크롤
     private let mediaClip = UIView()          // 사진이 보이는 영역 (정보 모드에서 위쪽으로 줄어듦)
@@ -1229,7 +1230,26 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         navigationItem.titleView = pill
     }
 
+    /// 순정: 처음엔 소리 없이 재생하다가, 소리 단추를 누르거나 음량 단추를 누르면 그때부터 소리 켬 (다른 영상도)
+    private var volumeObservation: NSKeyValueObservation?
+
+    private func watchVolumeButtons() {
+        let session = AVAudioSession.sharedInstance()
+        // 음량 값을 읽으려면 세션이 켜져 있어야 함. 다른 앱 음악을 끊지 않게 섞는 방식으로
+        if session.category != .playback { try? session.setCategory(.ambient) }
+        try? session.setActive(true, options: [])
+        volumeObservation = session.observe(\.outputVolume, options: [.new]) { [weak self] _, _ in
+            DispatchQueue.main.async {
+                guard let self, AssetPageViewController.videoMuted else { return }
+                AssetPageViewController.videoMuted = false
+                self.videoPage?.applyMute()
+                self.refreshVideoControls()
+            }
+        }
+    }
+
     private func setUpVideoControls() {
+        watchVolumeButtons()
         videoControls.onPlayPause = { [weak self] in
             self?.videoPage?.togglePlay()
         }

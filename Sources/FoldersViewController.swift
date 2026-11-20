@@ -441,6 +441,42 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         super.viewDidLayoutSubviews()
         let side = max(120, view.bounds.width / 2) * traitCollection.displayScale
         thumbSize = CGSize(width: side, height: side)
+        updateCompactTitle()
+    }
+
+    // MARK: - 가로 화면 큰 제목
+    // iOS 는 화면 높이가 낮으면(가로 아이폰) 큰 제목을 작은 가운데 제목으로 바꿔 버림.
+    // 순정 '모음'은 가로에서도 왼쪽 큰 제목이라, 그때만 우리가 직접 그림 (스크롤을 따라 같이 올라감)
+
+    private let compactTitle = UILabel()
+    private var compactTitleShown = false
+    private static let compactTitleHeight: CGFloat = 52
+
+    private func updateCompactTitle() {
+        let wantsLarge = navigationItem.largeTitleDisplayMode == .always
+        let show = wantsLarge && traitCollection.verticalSizeClass == .compact
+        if show != compactTitleShown {
+            compactTitleShown = show
+            if show {
+                compactTitle.text = navigationItem.title
+                compactTitle.font = .systemFont(ofSize: 34, weight: .bold)
+                collectionView.addSubview(compactTitle)
+                collectionView.contentInset.top += Self.compactTitleHeight
+                // 가운데 작은 제목은 숨김 (큰 제목이 대신함)
+                navigationItem.titleView = UIView()
+                collectionView.contentOffset.y = -collectionView.adjustedContentInset.top
+            } else {
+                compactTitle.removeFromSuperview()
+                collectionView.contentInset.top -= Self.compactTitleHeight
+                navigationItem.titleView = nil
+            }
+        }
+        guard show else { return }
+        compactTitle.text = navigationItem.title
+        let top = collectionView.adjustedContentInset.top
+        compactTitle.frame = CGRect(x: view.safeAreaInsets.left + 16, y: -top + (top - Self.compactTitleHeight) + 2,
+                                    width: max(0, collectionView.bounds.width - view.safeAreaInsets.left - 32),
+                                    height: Self.compactTitleHeight - 8)
     }
 
     // MARK: - 배치 (순정 사진 앱: 두 칸 큰 카드, 또는 목록)
