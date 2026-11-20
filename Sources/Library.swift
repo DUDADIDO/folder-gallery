@@ -94,6 +94,9 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
     }
     private var heldFetches: [String: HeldFetch] = [:]
     private var nextVersion = 1
+    /// 마지막으로 메인 줄에 보낸 목록과 그중 임시인 앨범 (work 줄에서만). 지우거나 옮길 때 여기서 바로 뺌
+    private var workItems: [String: AssetList] = [:]
+    private var workProvisional: Set<String> = []
     /// 날짜별 묶음: 목록 ID → (version, 묶음) (메인 줄에서만)
     private var sectionCache: [String: (version: Int, sections: DaySections)] = [:]
 
@@ -135,6 +138,8 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         let hide = hideMoved
         work.async {
             let quick = self.quickBuild()
+            self.workItems = quick.items
+            self.workProvisional = quick.provisional
             DispatchQueue.main.async {
                 // 전체 목록이 이미 들어왔으면 임시 목록으로 덮지 않음
                 guard !self.snapshot.loaded else { return }
@@ -150,8 +155,18 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
             // 들고 있는 목록마다 바뀐 게 있으면 새 결과로. 사진이 들어오거나 빠지거나 옮겨졌을 때만 version 을 바꿈
             // (즐겨찾기·편집처럼 내용만 바뀌면 version 은 그대로, 사진은 새 값)
             var replaced: [String: AssetList] = [:]
+            // 지워진 사진 (보관함에서 빠짐)과 사진 앱 앨범에 새로 들어간 사진
+            var deletedIDs = Set<String>()
+            var movedIDs = Set<String>()
             for (key, held) in self.heldFetches {
                 guard let details = changeInstance.changeDetails(for: held.result) else { continue }
+                if details.hasIncrementalChanges {
+                    if key == "all" {
+                        for asset in details.removedObjects { deletedIDs.insert(asset.localIdentifier) }
+                    } else if key.hasPrefix(Folder.albumPrefix) {
+                        for asset in details.insertedObjects { movedIDs.insert(asset.localIdentifier) }
+                    }
+                }
                 var updated = held
                 updated.result = details.fetchResultAfterChanges
                 let reordered = !details.hasIncrementalChanges
@@ -165,14 +180,35 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
                 self.heldFetches[key] = updated
                 replaced[key] = AssetList(fetch: updated.result, version: updated.version)
             }
+            // 자동 분류·미분류(배열·ID 목록)에서도 바로 뺌: 지운 사진은 모두에서, 앨범에 넣은 사진은 미분류에서
+            // (앨범에 넣은 사진 숨기기가 켜져 있으면 자동 분류에서도 — 전체 목록 만들기의 moved 와 같음).
+            // 새로 생긴 사진·앨범에서 뺀 사진은 여기서 더하지 않음 (이어지는 다시 만들기가 더함)
+            var patched: [String: (base: Int, list: AssetList)] = [:]
+            if !deletedIDs.isEmpty || !movedIDs.isEmpty {
+                let hide = self.hideMoved
+                for (key, list) in self.workItems where !list.isFetchBacked && !self.workProvisional.contains(key) {
+                    var drop = deletedIDs
+                    if key == "unsorted" || hide { drop.formUnion(movedIDs) }
+                    guard let next = list.removing(drop) else { continue }
+                    patched[key] = (list.version, next)
+                    self.workItems[key] = next
+                }
+            }
             DispatchQueue.main.async {
                 // 사진 앱에서 바로 읽는 목록(보관함·앨범·동영상·즐겨찾기)은 전체 목록을 다시 만들기를 기다리지 않고 바로 바꿔 넣음
-                // (지우거나 옮긴 것이 곧바로 보이게). 자동 분류·미분류·표지·앨범 구성은 이어지는 다시 만들기가 맞춤
-                if !replaced.isEmpty, self.snapshot.loaded {
+                // (지우거나 옮긴 것이 곧바로 보이게). 표지·앨범 구성·새 사진은 이어지는 다시 만들기가 맞춤
+                if (!replaced.isEmpty || !patched.isEmpty), self.snapshot.loaded {
                     var snap = self.snapshot
                     var changed = false
                     for (key, list) in replaced where snap.items[key] != nil {
                         snap.items[key] = list
+                        changed = true
+                    }
+                    // 뺀 목록은 그 사이 화면 쪽 목록이 바뀌지 않았을 때만 (같은 목록에서 뺀 것일 때만)
+                    for (key, entry) in patched where snap.items[key]?.version == entry.base && !snap.provisional.contains(key) {
+                        snap.items[key] = entry.list
+                        // 켤 때 넣어 둔 표지는 지웠을 수 있어서 목록의 첫 사진으로
+                        if !key.hasPrefix(Folder.albumPrefix) { snap.covers[key] = nil }
                         changed = true
                     }
                     if changed {
@@ -271,6 +307,9 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
     private func rebuildNow(hideMoved hide: Bool) {
         let (snap, pending) = build(hideMoved: hide)
         saveAutoSummary(snap)
+        saveGroupIDs(snap)
+        workItems = snap.items
+        workProvisional = snap.provisional
         DispatchQueue.main.async {
             self.snapshot = snap
             NotificationCenter.default.post(name: Library.didChange, object: nil)
@@ -333,8 +372,23 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         items["all"] = system.all.list
 
         var folders: [Folder] = []
-        // 미분류와 자동 분류 앨범은 전체 목록이 올 때까지 임시
-        var provisional: Set<String> = ["unsorted"]
+        // 자동 분류 앨범·미분류는 지난번에 저장해 둔 사진 ID 목록으로 바로 보여 줌 (사진은 보이는 부분만 나중에 읽음).
+        // 저장해 둔 것이 없으면(처음 켤 때 등) 전체 목록이 올 때까지 임시
+        var provisional: Set<String> = []
+        let groups = loadGroupIDs()
+        // 저장해 둔 사진이 지워졌을 때 대신 보여 줄 사진 (보관함이 비었으면 ID 목록을 쓰지 않음)
+        let placeholder = system.all.result.firstObject
+        func savedList(_ id: String) -> AssetList? {
+            guard let ids = groups[id] else { return nil }
+            if ids.isEmpty { return AssetList.make([]) }
+            guard let placeholder else { return nil }
+            return AssetList.make(identifiers: ids, placeholder: placeholder)
+        }
+        if let unsorted = savedList("unsorted") {
+            items["unsorted"] = unsorted
+        } else {
+            provisional.insert("unsorted")
+        }
         let summary = loadAutoSummary()
         let coverIDs = summary.compactMap { $0.cover }
         var found: [String: PHAsset] = [:]
@@ -350,6 +404,10 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
                 let real = entry.id == "videos" ? system.videos : system.favorites
                 guard !real.isEmpty else { continue }
                 items[entry.id] = real
+            } else if let saved = savedList(entry.id) {
+                // 저장해 둔 ID 목록 (임시 아님). 표지는 이미 읽은 표지 사진으로 (메인 줄에서 목록을 읽지 않게)
+                items[entry.id] = saved
+                if let coverID = entry.cover, let asset = found[coverID] { covers[entry.id] = asset }
             } else if let coverID = entry.cover {
                 // 표지 사진이 없어졌으면 그 앨범은 전체 목록이 올 때까지 뺌
                 guard let asset = found[coverID] else { continue }
@@ -400,6 +458,51 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         guard list != savedSummary, let data = try? JSONEncoder().encode(list) else { return }
         try? data.write(to: Library.summaryURL, options: .atomic)
         savedSummary = list
+    }
+
+    // MARK: - 자동 분류 앨범·미분류의 사진 ID 목록 (다음 실행 때 바로 보여 줌. 앨범 ID → 사진 ID 들(최신순)만)
+
+    private static let groupsURL: URL = {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("auto-folder-items-v1.json")
+    }()
+
+    /// 마지막으로 저장한(또는 읽은) 목록의 version (work 줄에서만). 같으면 다시 쓰지 않음
+    private var savedGroupVersions: [String: Int]?
+    /// 마지막으로 파일에 쓴 때 (work 줄에서만). 분류가 진행되는 동안은 자주 바뀌므로 띄엄띄엄 씀
+    private var lastGroupSave = Date.distantPast
+
+    private func loadGroupIDs() -> [String: [String]] {
+        guard let data = try? Data(contentsOf: Library.groupsURL),
+              let groups = try? JSONDecoder().decode([String: [String]].self, from: data) else { return [:] }
+        return groups
+    }
+
+    /// 전체 목록을 만든 뒤 배열 목록(자동 분류·미분류)의 사진 ID 를 저장 (work 줄에서만)
+    private func saveGroupIDs(_ snap: Snapshot) {
+        var versions: [String: Int] = [:]
+        for (id, list) in snap.items where !list.isFetchBacked {
+            versions[id] = list.version
+        }
+        // 켤 때 읽은 목록과 version 이 같으면(같은 사진·같은 차례) 쓰지 않음
+        let previous = savedGroupVersions ?? workItems.filter { !$0.value.isFetchBacked && !workProvisional.contains($0.key) }
+            .mapValues(\.version)
+        guard versions != previous else {
+            savedGroupVersions = versions
+            return
+        }
+        // 분류가 아직 남아 있으면 다시 만들 때마다 목록이 바뀜: 그때마다 몇 MB 를 쓰지 않게 20초에 한 번만
+        // (안 쓴 것은 다음 다시 만들기에서 다시 비교해서 씀. 분류가 끝나면 바로 씀)
+        if snap.pending > 0, Date().timeIntervalSince(lastGroupSave) < 20 { return }
+        var groups: [String: [String]] = [:]
+        for (id, list) in snap.items {
+            if let ids = list.identifiers() { groups[id] = ids }
+        }
+        guard let data = try? JSONEncoder().encode(groups) else { return }
+        try? data.write(to: Library.groupsURL, options: .atomic)
+        savedGroupVersions = versions
+        lastGroupSave = Date()
     }
 
     private func build(hideMoved: Bool) -> (Snapshot, [PHAsset]) {
