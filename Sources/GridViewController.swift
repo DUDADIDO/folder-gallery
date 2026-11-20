@@ -775,7 +775,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 modeBar.isHidden = true
                 modeBar.onMode = { [weak self] mode in self?.setLibraryMode(mode) }
                 modeBar.onLibrary = { [weak self] in self?.leaveDense() }
-                modeBar.onSearch = { [weak self] in self?.toast("검색은 준비 중이에요") }
+                modeBar.onSearch = { [weak self] in self?.presentSearch() }
                 view.addSubview(modeBar)
             }
             view.addSubview(titleOverlay)
@@ -939,6 +939,24 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 if self.moments === child { child.show(data, mode: child === self.moments ? self.modeBar.mode : mode, scrollToMonth: month) }
             }
         }
+    }
+
+    private func presentSearch() {
+        let search = SearchViewController()
+        search.onOpenFolder = { [weak self] id in self?.openFolderFromSearch(id) }
+        let nav = UINavigationController(rootViewController: search)
+        nav.modalPresentationStyle = .fullScreen
+        present(nav, animated: true)
+    }
+
+    /// 검색에서 앨범을 고름: 앨범 탭으로 가서 그 앨범을 엶
+    private func openFolderFromSearch(_ id: String) {
+        guard let folder = Library.shared.snapshot.folders.first(where: { $0.id == id }),
+              let tabs = tabBarController, let viewControllers = tabs.viewControllers, viewControllers.count > 1,
+              let albums = viewControllers[1] as? UINavigationController else { return }
+        tabs.selectedIndex = 1
+        albums.popToRootViewController(animated: false)
+        albums.pushViewController(GridViewController(folder: folder), animated: true)
     }
 
     /// 월 보기에서 날짜를 누름 → 전체 보기(3칸)에서 그날로
