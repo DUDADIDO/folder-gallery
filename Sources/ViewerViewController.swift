@@ -2102,11 +2102,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             UIAction(title: "앨범으로 이동", image: UIImage(systemName: "folder")) { [weak self] _ in self?.sendCurrent(copy: false) },
         ])
         let adjust = UIMenu(title: "정보 조정", image: UIImage(systemName: "info.circle"), children: [
-            UIAction(title: "날짜 및 시간 조정", image: UIImage(systemName: "calendar")) { [weak self] _ in
+            UIAction(title: "날짜 및 시간 조정", image: UIImage(systemName: "calendar.badge.clock")) { [weak self] _ in
                 guard let self, let page = self.currentPage else { return }
                 self.adjustDate(of: page)
             },
-            UIAction(title: "위치 조정", image: UIImage(systemName: "location")) { [weak self] _ in
+            UIAction(title: "위치 조정", image: UIImage(systemName: "mappin.circle")) { [weak self] _ in
                 guard let self, let page = self.currentPage else { return }
                 self.addLocation(to: page)
             },

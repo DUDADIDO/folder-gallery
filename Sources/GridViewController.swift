@@ -2246,8 +2246,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         var lower: [UIMenuElement] = [UIMenu(title: "추가 대상", image: UIImage(systemName: "photo.on.rectangle.angled"), children: addActions)]
         if single, let asset = assets.first, asset.canPerform(.properties) {
             lower.append(UIMenu(title: "정보 조정", image: UIImage(systemName: "info.circle"), children: [
-                UIAction(title: "날짜 및 시간 조정", image: UIImage(systemName: "calendar")) { [weak self] _ in self?.adjustDate(asset) },
-                UIAction(title: "위치 조정", image: UIImage(systemName: "location")) { [weak self] _ in self?.adjustLocation(asset) },
+                UIAction(title: "날짜 및 시간 조정", image: UIImage(systemName: "calendar.badge.clock")) { [weak self] _ in self?.adjustDate(asset) },
+                UIAction(title: "위치 조정", image: UIImage(systemName: "mappin.circle")) { [weak self] _ in self?.adjustLocation(asset) },
             ]))
         }
         var children: [UIMenuElement] = [top, UIMenu(options: .displayInline, children: middle),

@@ -1125,15 +1125,16 @@ final class DateAdjustViewController: UIViewController {
 
 // MARK: - 위치 추가 시트 (순정처럼: 장소를 검색해서 고름)
 
-final class LocationSearchViewController: UITableViewController, UISearchResultsUpdating, MKLocalSearchCompleterDelegate {
+final class LocationSearchViewController: UITableViewController, UISearchBarDelegate, MKLocalSearchCompleterDelegate {
     var onPick: ((CLLocation) -> Void)?
     private let completer = MKLocalSearchCompleter()
     private var results: [MKLocalSearchCompletion] = []
-    private let search = UISearchController(searchResultsController: nil)
+    /// 순정 iOS 27: 제목 바로 밑에 검색창 (아래쪽 검색이 아님)
+    private let searchBar = UISearchBar()
     private var searching = false
 
     init() {
-        super.init(style: .insetGrouped)
+        super.init(style: .plain)
     }
 
     required init?(coder: NSCoder) {
@@ -1142,13 +1143,24 @@ final class LocationSearchViewController: UITableViewController, UISearchResults
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "위치 추가"
-        navigationItem.leftBarButtonItem = UIBarButtonItem(title: "취소", style: .plain, target: self, action: #selector(cancel))
-        search.searchResultsUpdater = self
-        search.obscuresBackgroundDuringPresentation = false
-        search.searchBar.placeholder = "위치 검색"
-        navigationItem.searchController = search
-        navigationItem.hidesSearchBarWhenScrolling = false
+        if title == nil { title = "위치 조정" }
+        navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(cancel))
+        view.backgroundColor = .systemBackground
+        searchBar.placeholder = "새로운 위치 입력"
+        searchBar.searchBarStyle = .minimal
+        searchBar.delegate = self
+        // 순정처럼 양옆 여백을 더 두고, 위아래에 가는 선
+        let header = UIView(frame: CGRect(x: 0, y: 0, width: view.bounds.width, height: 64))
+        searchBar.frame = header.bounds.insetBy(dx: 8, dy: 4)
+        searchBar.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        header.addSubview(searchBar)
+        for y in [CGFloat(0), 64 - 1 / UIScreen.main.scale] {
+            let line = UIView(frame: CGRect(x: 16, y: y, width: header.bounds.width - 32, height: 1 / UIScreen.main.scale))
+            line.backgroundColor = .separator
+            line.autoresizingMask = [.flexibleWidth]
+            header.addSubview(line)
+        }
+        tableView.tableHeaderView = header
         completer.delegate = self
         completer.resultTypes = [.address, .pointOfInterest]
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "place")
@@ -1157,15 +1169,15 @@ final class LocationSearchViewController: UITableViewController, UISearchResults
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // 바로 입력할 수 있게
-        DispatchQueue.main.async { self.search.searchBar.becomeFirstResponder() }
+        DispatchQueue.main.async { self.searchBar.becomeFirstResponder() }
     }
 
     @objc private func cancel() {
         dismiss(animated: true)
     }
 
-    func updateSearchResults(for searchController: UISearchController) {
-        let text = searchController.searchBar.text?.trimmingCharacters(in: .whitespaces) ?? ""
+    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+        let text = searchText.trimmingCharacters(in: .whitespaces)
         if text.isEmpty {
             results = []
             tableView.reloadData()
@@ -1212,7 +1224,7 @@ final class LocationSearchViewController: UITableViewController, UISearchResults
             guard let coordinate = response?.mapItems.first?.placemark.coordinate else { return }
             let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
             let onPick = self.onPick
-            self.search.isActive = false
+            self.searchBar.resignFirstResponder()
             self.dismiss(animated: true) { onPick?(location) }
         }
     }
