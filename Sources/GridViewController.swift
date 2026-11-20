@@ -130,13 +130,14 @@ final class DayHeaderView: UICollectionReusableView {
     }
 }
 
-/// 앨범에 들어가면 맨 위에 나오는 큰 대표 사진 + 이름 + 장수 (순정 사진 앱 모양)
+/// 앨범에 들어가면 맨 위에 나오는 정사각형 대표 사진 + 이름 + 장수 (순정 사진 앱 모양)
 final class HeroHeaderView: UICollectionReusableView {
     static let reuse = "HeroHeaderView"
 
     let imageView = UIImageView()
     let titleLabel = UILabel()
     let countLabel = UILabel()
+    private let glyph = UIImageView(image: UIImage(systemName: "rectangle.stack"))
     private let shade = CAGradientLayer()
     var assetID: String?
     var requestID: PHImageRequestID = PHInvalidImageRequestID
@@ -153,9 +154,15 @@ final class HeroHeaderView: UICollectionReusableView {
         titleLabel.font = .systemFont(ofSize: 34, weight: .bold)
         titleLabel.textColor = .white
         addSubview(titleLabel)
-        countLabel.font = .systemFont(ofSize: 17, weight: .medium)
+        titleLabel.adjustsFontSizeToFitWidth = true
+        titleLabel.minimumScaleFactor = 0.6
+        countLabel.font = .systemFont(ofSize: 15, weight: .medium)
         countLabel.textColor = .white
         addSubview(countLabel)
+        glyph.tintColor = .white
+        glyph.contentMode = .scaleAspectFit
+        glyph.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        addSubview(glyph)
     }
 
     required init?(coder: NSCoder) {
@@ -169,8 +176,10 @@ final class HeroHeaderView: UICollectionReusableView {
         imageView.frame = bounds
         shade.frame = CGRect(x: 0, y: bounds.height * 0.5, width: bounds.width, height: bounds.height * 0.5)
         CATransaction.commit()
-        countLabel.frame = CGRect(x: 20, y: bounds.height - 44, width: bounds.width - 40, height: 24)
-        titleLabel.frame = CGRect(x: 20, y: bounds.height - 88, width: bounds.width - 40, height: 42)
+        // 왼쪽 아래: 이름, 그 아래 작은 앨범 모양 + "10개의 항목"
+        glyph.frame = CGRect(x: 20, y: bounds.height - 36, width: 16, height: 16)
+        countLabel.frame = CGRect(x: 41, y: bounds.height - 39, width: bounds.width - 61, height: 22)
+        titleLabel.frame = CGRect(x: 20, y: bounds.height - 82, width: bounds.width - 40, height: 42)
     }
 }
 
@@ -208,9 +217,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         self.folder = folder
         self.isRoot = isRoot
         super.init(nibName: nil, bundle: nil)
-        hidesBottomBarWhenPushed = !isRoot
-        let saved = Prefs.gridColumns
-        columns = columnChoices.contains(saved) ? saved : 4
+        // 앨범 안에서도 순정처럼 아래 탭 막대를 그대로 둠 (닫히는 확대 전환 끝에서 화면이 덜컥이지 않게)
+        let saved = isRoot ? Prefs.gridColumns : Prefs.albumGridColumns
+        columns = columnChoices.contains(saved) ? saved : (isRoot ? 4 : 5)
     }
 
     required init?(coder: NSCoder) {
@@ -294,7 +303,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let anchor = collectionView.indexPathForItem(at: gesture.location(in: collectionView))
             ?? collectionView.indexPathsForVisibleItems.min()
         columns = columnChoices[next]
-        Prefs.gridColumns = columns
+        if isRoot {
+            Prefs.gridColumns = columns
+        } else {
+            Prefs.albumGridColumns = columns
+        }
         Thumbs.manager.stopCachingImagesForAllAssets()
         view.setNeedsLayout()
         // 칸이 커지고 작아지는 것이 보이게 움직이면서 바꿈. 보던 사진이 가운데 남도록 아래 함수에서 자리를 잡음
@@ -341,7 +354,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             group.interItemSpacing = .fixed(spacing)
             let section = NSCollectionLayoutSection(group: group)
             section.interGroupSpacing = spacing
-            let headerHeight: CGFloat = hero ? min(width * 1.15, 460) : 42
+            // 앨범 표지는 정사각형 (앨범 카드와 같은 모양이라 확대 전환이 딱 맞음)
+            let headerHeight: CGFloat = hero ? width : 42
             let headerSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(headerHeight))
             let header = NSCollectionLayoutBoundarySupplementaryItem(layoutSize: headerSize,
                                                                      elementKind: UICollectionView.elementKindSectionHeader,
@@ -366,10 +380,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
             return
         }
-        let new = snapshot.items[folder.id] ?? []
+        var new = snapshot.items[folder.id] ?? []
+        // 앨범 안은 순정처럼 오래된 항목 순이 기본
+        if !newestFirst { new.reverse() }
         let newIDs = new.map(\.localIdentifier)
         if !force && newIDs == assetIDs {
             assets = new   // 순서는 같아도 즐겨찾기·편집 상태가 바뀐 새 값으로
+            refreshHero()   // 이름·표지가 바뀌었을 수 있음
             return
         }
 
@@ -422,6 +439,24 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
         if let current { result.append((current, start..<assets.count)) }
         sections = result
+    }
+
+    /// 앨범 화면은 최신순인지 (보관함·미분류 탭은 늘 최신순)
+    private var newestFirst: Bool {
+        isRoot || Prefs.newestFirstAlbums.contains(folder.id)
+    }
+
+    /// 앨범 카드에서 열리고 닫히는 확대 전환이 맞출 자리: 맨 위 정사각형 표지 (이 화면 좌표)
+    func zoomCoverRect() -> CGRect {
+        var width = isViewLoaded ? view.bounds.width : 0
+        if width <= 0 { width = navigationController?.view.bounds.width ?? 0 }
+        var rect = CGRect(x: 0, y: 0, width: width, height: width)
+        if isViewLoaded, collectionView != nil, !isRoot, !sections.isEmpty,
+           let attributes = collectionView.layoutAttributesForSupplementaryElement(ofKind: UICollectionView.elementKindSectionHeader,
+                                                                                  at: IndexPath(item: 0, section: 0)) {
+            rect = collectionView.convert(attributes.frame, to: view)
+        }
+        return rect
     }
 
     /// 확대 전환이 시작하고 돌아올 자리 (그 사진의 칸). 화면 밖이면 nil
@@ -495,10 +530,22 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         return header
     }
 
+    private func refreshHero() {
+        guard !isRoot, isViewLoaded, collectionView != nil else { return }
+        let kind = UICollectionView.elementKindSectionHeader
+        for path in collectionView.indexPathsForVisibleSupplementaryElements(ofKind: kind) {
+            if let hero = collectionView.supplementaryView(forElementKind: kind, at: path) as? HeroHeaderView {
+                configureHero(hero)
+            }
+        }
+    }
+
     private func configureHero(_ hero: HeroHeaderView) {
-        hero.titleLabel.text = folder.title
+        let snapshot = Library.shared.snapshot
+        hero.titleLabel.text = snapshot.nodes[folder.id]?.title ?? folder.title
         hero.countLabel.text = "\(assets.count)개의 항목"
-        guard let cover = assets.first else { return }
+        // 사진 앱 앨범은 그 앨범의 대표 사진, 아니면 가장 최근 사진 (앨범 카드와 같은 사진)
+        guard let cover = snapshot.cover(folder.id) ?? assets.last else { return }
         let id = cover.localIdentifier
         guard hero.assetID != id else { return }
         if hero.requestID != PHInvalidImageRequestID {
@@ -506,7 +553,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
         hero.assetID = id
         let scale = traitCollection.displayScale
-        let size = CGSize(width: view.bounds.width * scale, height: view.bounds.width * 1.15 * scale)
+        let size = CGSize(width: view.bounds.width * scale, height: view.bounds.width * scale)
         let options = PHImageRequestOptions()
         options.deliveryMode = .opportunistic
         options.isNetworkAccessAllowed = true
@@ -558,12 +605,19 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         } else {
             collectionView.deselectItem(at: indexPath, animated: false)
             let viewer = ViewerViewController(assets: assets, index: flatIndex(indexPath), sourceAlbumID: folder.albumID)
+            viewer.fallbackBounds = view.bounds
             if #available(iOS 18.0, *) {
                 let options = UIViewController.Transition.ZoomOptions()
                 // 정보 칸이 떠 있거나 확대 중일 때는 끌어내려 닫기를 막음
                 options.interactiveDismissShouldBegin = { [weak viewer] _ in
                     viewer?.allowsInteractiveDismiss ?? true
                 }
+                // 흰 화면 전체가 아니라 사진이 보이는 자리만 썸네일과 맞춤. 뒤의 격자는 어둡게 하지 않음
+                // (바탕은 보기 화면이 스스로 서서히 나타나고 사라지게 함)
+                options.alignmentRectProvider = { [weak viewer] _ in
+                    viewer?.zoomAlignmentRect() ?? .zero
+                }
+                options.dimmingColor = .clear
                 viewer.preferredTransition = .zoom(options: options, sourceViewProvider: { [weak self, weak viewer] _ in
                     guard let self, let id = viewer?.visibleAssetID else { return nil }
                     return self.thumbnailView(forAssetID: id)
@@ -617,7 +671,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         for cell in collectionView.visibleCells {
             (cell as? AssetCell)?.selecting = on
         }
-        if isRoot, #available(iOS 18.0, *) {
+        // 선택하는 동안은 아래 탭 막대 대신 선택 막대 (앨범 안에서도)
+        if #available(iOS 18.0, *) {
             tabBarController?.setTabBarHidden(on, animated: true)
         }
         // 옆으로 끌어 선택하는 동안 '밀어서 뒤로'가 잡히지 않게
@@ -714,9 +769,66 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
             let select = UIBarButtonItem(title: "선택", style: .plain, target: self, action: #selector(startSelecting))
             select.isEnabled = !assets.isEmpty
-            navigationItem.rightBarButtonItem = select
+            if isRoot {
+                navigationItem.rightBarButtonItem = select
+            } else {
+                // 순정 앨범 화면처럼: [정렬 ⋯] [선택]
+                var items: [UIBarButtonItem] = [select, UIBarButtonItem.fixedSpace(8)]
+                if folder.isUser {
+                    items.append(UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeAlbumMenu()))
+                }
+                items.append(UIBarButtonItem(image: UIImage(systemName: "line.3.horizontal.decrease"), menu: makeSortMenu()))
+                navigationItem.rightBarButtonItems = items
+            }
         }
         refreshVisibleHeaders()
+    }
+
+    // MARK: - 앨범 화면의 위 버튼 (정렬 · ⋯)
+
+    private func makeSortMenu() -> UIMenu {
+        let newest = Prefs.newestFirstAlbums.contains(folder.id)
+        let oldestAction = UIAction(title: "오래된 항목 순으로", image: UIImage(systemName: "clock.arrow.circlepath"),
+                                    state: newest ? .off : .on) { [weak self] _ in
+            self?.setNewestFirst(false)
+        }
+        let newestAction = UIAction(title: "최신 항목 순으로", image: UIImage(systemName: "clock"),
+                                    state: newest ? .on : .off) { [weak self] _ in
+            self?.setNewestFirst(true)
+        }
+        return UIMenu(title: "정렬", children: [oldestAction, newestAction])
+    }
+
+    private func setNewestFirst(_ on: Bool) {
+        var set = Prefs.newestFirstAlbums
+        if on {
+            set.insert(folder.id)
+        } else {
+            set.remove(folder.id)
+        }
+        Prefs.newestFirstAlbums = set
+        reloadFromLibrary(force: true)
+        updateChrome()
+    }
+
+    /// 사진 앱 앨범에서 실제로 할 수 있는 것만: 이름 변경 · 앨범 삭제
+    private func makeAlbumMenu() -> UIMenu {
+        let id = folder.id
+        let rename = UIAction(title: "이름 변경", image: UIImage(systemName: "pencil")) { [weak self] _ in
+            guard let self else { return }
+            let current = Library.shared.snapshot.nodes[id]?.title ?? self.folder.title
+            self.promptText(title: "이름 변경", initial: current, placeholder: "이름", confirm: "저장") { name in
+                Library.shared.rename(id, to: name)
+            }
+        }
+        let delete = UIAction(title: "앨범 삭제", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+            guard let self else { return }
+            let title = Library.shared.snapshot.nodes[id]?.title ?? self.folder.title
+            self.confirm(title: "'\(title)' 을(를) 삭제할까요?", message: "앨범만 삭제돼요. 사진은 삭제되지 않아요.", action: "삭제") {
+                Library.shared.deleteCollection(id)
+            }
+        }
+        return UIMenu(children: [rename, delete])
     }
 
     // MARK: - 아래 막대

@@ -32,6 +32,8 @@ struct Snapshot {
     var children: [String: [String]] = [:]
     /// 사진 앱의 앨범·폴더
     var nodes: [String: Folder] = [:]
+    /// 사진 앱 앨범 ID → 대표 사진 (사진 앱이 정한 것)
+    var covers: [String: PHAsset] = [:]
     var pending = 0
     var total = 0
     var loaded = false
@@ -39,6 +41,11 @@ struct Snapshot {
     static let top = "top"
 
     var autoFolders: [Folder] { folders.filter { $0.isAuto } }
+
+    /// 표지 사진: 사진 앱 앨범은 그 앨범의 대표 사진, 없으면 가장 최근 사진
+    func cover(_ id: String) -> PHAsset? {
+        covers[id] ?? items[id]?.first
+    }
 
     /// 폴더 안(하위 폴더 포함)의 앨범들
     func albums(under id: String) -> [Folder] {
@@ -165,7 +172,13 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
 
         var moved = Set<String>()
         var userFolders: [Folder] = []
+        var covers: [String: PHAsset] = [:]
         for (id, album) in albumObjects {
+            // 사진 앱이 앨범 표지로 쓰는 사진 (순정 카드와 같은 사진이 나오게)
+            let keyAssets: PHFetchResult<PHAsset>? = PHAsset.fetchKeyAssets(in: album, options: nil)
+            if let key = keyAssets?.firstObject {
+                covers[id] = key
+            }
             let inAlbum = PHAsset.fetchAssets(in: album, options: newestFirst)
             var list: [PHAsset] = []
             list.reserveCapacity(inAlbum.count)
@@ -239,7 +252,7 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         }
         folders.append(contentsOf: userFolders)
 
-        let snap = Snapshot(folders: folders, items: items, children: children, nodes: nodes,
+        let snap = Snapshot(folders: folders, items: items, children: children, nodes: nodes, covers: covers,
                             pending: pending.count, total: all.count, loaded: true)
         return (snap, pending)
     }

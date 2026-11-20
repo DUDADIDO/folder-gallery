@@ -1,28 +1,87 @@
 import AVFoundation
-import AVKit
 import CoreLocation
-import ImageIO
 import Photos
+import PhotosUI
 import UIKit
-import UniformTypeIdentifiers
 
-/// 사진 한 장 (확대 가능). 영상은 재생 버튼
+/// 그림 자리 계산
+enum Geo {
+    /// size 를 rect 안에 다 보이게 (남는 곳은 비움)
+    static func fit(_ size: CGSize, in rect: CGRect) -> CGRect {
+        guard size.width > 0, size.height > 0, rect.width > 0, rect.height > 0 else { return rect }
+        let scale = min(rect.width / size.width, rect.height / size.height)
+        let width = size.width * scale, height = size.height * scale
+        return CGRect(x: rect.midX - width / 2, y: rect.midY - height / 2, width: width, height: height)
+    }
+
+    /// size 로 rect 를 꽉 채우게 (넘치는 곳은 잘림)
+    static func fill(_ size: CGSize, in rect: CGRect) -> CGRect {
+        guard size.width > 0, size.height > 0, rect.width > 0, rect.height > 0 else { return rect }
+        let scale = max(rect.width / size.width, rect.height / size.height)
+        let width = size.width * scale, height = size.height * scale
+        return CGRect(x: rect.midX - width / 2, y: rect.midY - height / 2, width: width, height: height)
+    }
+
+    static func lerp(_ a: CGRect, _ b: CGRect, _ t: CGFloat) -> CGRect {
+        CGRect(x: a.minX + (b.minX - a.minX) * t,
+               y: a.minY + (b.minY - a.minY) * t,
+               width: a.width + (b.width - a.width) * t,
+               height: a.height + (b.height - a.height) * t)
+    }
+}
+
+/// 영상 그림판 (AVPlayerLayer 를 그대로 씀)
+final class PlayerView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+}
+
+/// 사진 한 장 (확대 가능). Live Photo 는 길게 눌러 재생, 영상은 이 안에서 바로 재생.
+/// 정보를 열면 사진이 위쪽을 꽉 채우고 그 아래에 정보 카드가 이어져 한 장처럼 위아래로 스크롤됨.
+/// (이 화면의 맨 바깥 view 는 움직이지 않음. 움직이는 건 안쪽의 우리 view 들뿐)
 final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
     let asset: PHAsset
     var onSingleTap: (() -> Void)?
+    /// 정보를 연 채 맨 위에서 아래로 당겼을 때 (정보 닫기)
+    var onInfoPullDown: (() -> Void)?
+    /// 영상 상태가 바뀜 (불러옴 · 재생 · 멈춤 · 끝)
+    var onPlaybackChange: (() -> Void)?
+    /// 영상 소리 끔 (보기 화면을 닫아도 앱이 켜져 있는 동안 기억)
+    static var videoMuted = false
 
-    private let scrollView = UIScrollView()
+    private let pageScroll = UIScrollView()   // 정보 모드에서 사진 + 정보를 한 장으로 세로 스크롤
+    private let mediaClip = UIView()          // 사진이 보이는 영역 (정보 모드에서 위쪽으로 줄어듦)
+    private let zoomScroll = UIScrollView()   // 두 손가락 확대
+    private let mediaView = UIView()          // 확대되는 것. 사진·Live·영상이 다 이 안에
     private let imageView = UIImageView()
-    private let playButton = UIButton(type: .system)
+    private var livePhotoView: PHLivePhotoView?
+    private var playerView: PlayerView?
+    private let spinner = UIActivityIndicatorView(style: .medium)
+    private var infoPanel: InfoPanelView?
+    private var panelHeight: CGFloat?
+    private(set) var infoProgress: CGFloat = 0
+
     private var requestID: PHImageRequestID = PHInvalidImageRequestID
+    private var liveRequestID: PHImageRequestID = PHInvalidImageRequestID
+    private var videoRequestID: PHImageRequestID = PHInvalidImageRequestID
     private var loadedSize: CGSize = .zero
-    private var loadingVideo = false
+    private var layoutSize: CGSize = .zero
+    private var isActive = false      // 지금 보고 있는 사진인지 (viewDidAppear ~ viewWillDisappear)
+    private var hintPlayed = false
+    private var liveEnabled: Bool
+    private(set) var player: AVPlayer?
+    private var videoFailed = false
+    private var endObserver: NSObjectProtocol?
 
-    /// 확대해서 보는 중인지 (이때는 아래로 쓸어 닫기를 안 함)
-    var isZoomed: Bool { scrollView.zoomScale > 1.01 }
+    /// 확대해서 보는 중인지 (이때는 아래로 쓸어 닫기·정보 열기를 안 함)
+    var isZoomed: Bool { zoomScroll.zoomScale > 1.01 }
+    var isVideo: Bool { asset.mediaType == .video }
+    var isLivePhoto: Bool { asset.mediaType == .image && asset.mediaSubtypes.contains(.photoLive) }
+    var isPlaying: Bool { (player?.rate ?? 0) != 0 }
 
-    init(asset: PHAsset) {
+    init(asset: PHAsset, liveEnabled: Bool) {
         self.asset = asset
+        self.liveEnabled = liveEnabled
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -31,69 +90,234 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
     }
 
     deinit {
-        if requestID != PHInvalidImageRequestID {
-            PHImageManager.default().cancelImageRequest(requestID)
+        let manager = PHImageManager.default()
+        for id in [requestID, liveRequestID, videoRequestID] where id != PHInvalidImageRequestID {
+            manager.cancelImageRequest(id)
         }
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+        }
+        player?.pause()
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
 
-        scrollView.delegate = self
-        scrollView.minimumZoomScale = 1
-        scrollView.maximumZoomScale = 5
-        scrollView.showsVerticalScrollIndicator = false
-        scrollView.showsHorizontalScrollIndicator = false
-        scrollView.contentInsetAdjustmentBehavior = .never
-        scrollView.frame = view.bounds
-        view.addSubview(scrollView)
+        pageScroll.frame = view.bounds
+        pageScroll.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        pageScroll.contentInsetAdjustmentBehavior = .never
+        pageScroll.showsVerticalScrollIndicator = false
+        pageScroll.showsHorizontalScrollIndicator = false
+        pageScroll.alwaysBounceVertical = true
+        pageScroll.isScrollEnabled = false
+        pageScroll.scrollsToTop = false
+        pageScroll.delegate = self
+        view.addSubview(pageScroll)
 
+        mediaClip.clipsToBounds = true
+        pageScroll.addSubview(mediaClip)
+
+        zoomScroll.delegate = self
+        zoomScroll.minimumZoomScale = 1
+        zoomScroll.maximumZoomScale = isVideo ? 1 : 5
+        zoomScroll.showsVerticalScrollIndicator = false
+        zoomScroll.showsHorizontalScrollIndicator = false
+        zoomScroll.contentInsetAdjustmentBehavior = .never
+        zoomScroll.scrollsToTop = false
+        mediaClip.addSubview(zoomScroll)
+
+        zoomScroll.addSubview(mediaView)
         imageView.contentMode = .scaleAspectFit
-        imageView.frame = scrollView.bounds
-        scrollView.addSubview(imageView)
+        imageView.frame = mediaView.bounds
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        mediaView.addSubview(imageView)
+
+        spinner.hidesWhenStopped = true
+        spinner.color = .white
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(spinner)
+        NSLayoutConstraint.activate([
+            spinner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+        ])
 
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
         doubleTap.numberOfTapsRequired = 2
-        scrollView.addGestureRecognizer(doubleTap)
+        zoomScroll.addGestureRecognizer(doubleTap)
         let singleTap = UITapGestureRecognizer(target: self, action: #selector(singleTapped))
         singleTap.require(toFail: doubleTap)
-        scrollView.addGestureRecognizer(singleTap)
+        zoomScroll.addGestureRecognizer(singleTap)
 
-        if asset.mediaType == .video {
-            let config = UIImage.SymbolConfiguration(pointSize: 64, weight: .regular)
-            playButton.setImage(UIImage(systemName: "play.circle.fill", withConfiguration: config), for: .normal)
-            playButton.tintColor = .white
-            playButton.layer.shadowColor = UIColor.black.cgColor
-            playButton.layer.shadowOpacity = 0.5
-            playButton.layer.shadowRadius = 6
-            playButton.layer.shadowOffset = .zero
-            playButton.addTarget(self, action: #selector(play), for: .touchUpInside)
-            playButton.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(playButton)
-            NSLayoutConstraint.activate([
-                playButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-                playButton.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            ])
-            scrollView.maximumZoomScale = 1
-        }
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive),
+                                               name: UIApplication.willResignActiveNotification, object: nil)
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        if scrollView.frame.size != view.bounds.size {
-            scrollView.zoomScale = 1
-            scrollView.frame = view.bounds
-            imageView.frame = scrollView.bounds
-            scrollView.contentSize = scrollView.bounds.size
+        let size = view.bounds.size
+        if size != layoutSize {
+            layoutSize = size
+            if zoomScroll.zoomScale != 1 { zoomScroll.zoomScale = 1 }
+            panelHeight = nil
         }
+        applyLayout()
         loadImageIfNeeded()
+        loadLiveIfNeeded()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        loadVideoIfNeeded()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        isActive = true
+        if isVideo {
+            if player != nil {
+                play()
+            } else {
+                loadVideoIfNeeded()
+            }
+        }
+        playHintIfNeeded()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        isActive = false
+        if isPlaying { pausePlayback() }
+        livePhotoView?.stopPlayback()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        scrollView.zoomScale = 1
+        if isZoomed { zoomScroll.setZoomScale(1, animated: false) }
     }
+
+    @objc private func appWillResignActive() {
+        if isPlaying { pausePlayback() }
+    }
+
+    // MARK: - 배치
+
+    private var mediaSize: CGSize {
+        if asset.pixelWidth > 0 && asset.pixelHeight > 0 {
+            return CGSize(width: asset.pixelWidth, height: asset.pixelHeight)
+        }
+        return view.bounds.size
+    }
+
+    /// 정보를 다 열었을 때 사진이 차지하는 위쪽 (화면 맨 위부터 46%)
+    private var infoMediaRect: CGRect {
+        CGRect(x: 0, y: 0, width: view.bounds.width, height: (view.bounds.height * 0.46).rounded())
+    }
+
+    /// 정보 진행도(0: 사진만 ~ 1: 사진은 위쪽을 꽉, 아래에 정보)에 맞춰 자리를 잡음
+    private func applyLayout() {
+        let bounds = CGRect(origin: .zero, size: view.bounds.size)
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let progress = infoProgress
+        let top = infoMediaRect
+        let clip = Geo.lerp(bounds, top, progress)
+        // 변형(아래로 끌어 닫기)이 걸려 있어도 안전하게 크기와 중심으로 놓음
+        mediaClip.bounds = CGRect(origin: .zero, size: clip.size)
+        mediaClip.center = CGPoint(x: clip.midX, y: clip.midY)
+        let clipBounds = mediaClip.bounds
+        if zoomScroll.frame != clipBounds {
+            if zoomScroll.zoomScale != 1 { zoomScroll.zoomScale = 1 }
+            zoomScroll.frame = clipBounds
+        }
+        if !isZoomed {
+            if progress <= 0 {
+                mediaView.frame = clipBounds
+            } else {
+                // 화면에 맞춘 크기(aspect fit)에서 위쪽을 꽉 채운 크기(aspect fill)로
+                let fit = Geo.fit(mediaSize, in: bounds)
+                let fill = Geo.fill(mediaSize, in: top)
+                mediaView.frame = Geo.lerp(fit, fill, progress).offsetBy(dx: -clip.minX, dy: -clip.minY)
+            }
+            zoomScroll.contentSize = clipBounds.size
+        }
+
+        var contentHeight = bounds.height
+        if let panel = infoPanel {
+            let height = panelHeight ?? measurePanel(width: bounds.width)
+            let finalY = top.maxY + 14
+            let y = bounds.height + (finalY - bounds.height) * progress
+            panel.frame = CGRect(x: 0, y: y, width: bounds.width, height: height)
+            panel.alpha = min(1, progress * 1.4)
+            contentHeight = max(bounds.height, finalY + height + view.safeAreaInsets.bottom + 20)
+        }
+        let contentSize = CGSize(width: bounds.width, height: contentHeight)
+        if pageScroll.contentSize != contentSize {
+            pageScroll.contentSize = contentSize
+        }
+    }
+
+    private func measurePanel(width: CGFloat) -> CGFloat {
+        guard let panel = infoPanel else { return 0 }
+        let size = panel.systemLayoutSizeFitting(CGSize(width: width, height: UIView.layoutFittingCompressedSize.height),
+                                                 withHorizontalFittingPriority: .required,
+                                                 verticalFittingPriority: .fittingSizeLevel)
+        panelHeight = size.height
+        return size.height
+    }
+
+    /// 사진이 실제로 보이는 자리 (확대 전환이 맞출 곳)
+    func mediaFrame(in target: UIView) -> CGRect {
+        let fit = Geo.fit(mediaSize, in: mediaView.bounds)
+        let rect = mediaView.convert(fit, to: target)
+        let clip = mediaClip.convert(mediaClip.bounds, to: target)
+        let visible = rect.intersection(clip)
+        return (visible.isNull || visible.isEmpty) ? rect : visible
+    }
+
+    // MARK: - 정보
+
+    /// 0: 사진만, 1: 사진이 위를 꽉 채우고 아래에 정보 (애니메이션 블록 안에서 불러도 됨)
+    func setInfoProgress(_ value: CGFloat) {
+        let progress = min(1, max(0, value))
+        if progress > 0 {
+            ensureInfoPanel()
+            if isZoomed { zoomScroll.setZoomScale(1, animated: false) }
+        }
+        infoProgress = progress
+        pageScroll.isScrollEnabled = progress >= 1
+        zoomScroll.pinchGestureRecognizer?.isEnabled = progress <= 0
+        if progress < 1, pageScroll.contentOffset != .zero {
+            pageScroll.contentOffset = .zero
+        }
+        applyLayout()
+    }
+
+    private func ensureInfoPanel() {
+        guard infoPanel == nil, isViewLoaded else { return }
+        let panel = InfoPanelView(asset: asset)
+        panel.alpha = 0
+        panel.frame = CGRect(x: 0, y: view.bounds.height, width: view.bounds.width, height: 0)
+        panel.onContentChange = { [weak self] in
+            guard let self else { return }
+            self.panelHeight = nil
+            self.view.setNeedsLayout()
+        }
+        pageScroll.addSubview(panel)
+        infoPanel = panel
+    }
+
+    /// 넘기고 남은 화면을 원래대로
+    func resetTransientState() {
+        mediaClip.transform = .identity
+        if infoProgress != 0 { setInfoProgress(0) }
+    }
+
+    /// iOS 17 에서 아래로 끌어 닫을 때 (우리 view 만 움직임)
+    func setDismissDrag(_ transform: CGAffineTransform) {
+        mediaClip.transform = transform
+    }
+
+    // MARK: - 불러오기
 
     private func loadImageIfNeeded() {
         let size = view.bounds.size
@@ -114,47 +338,187 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
         }
     }
 
+    /// Live Photo 는 시스템의 PHLivePhotoView 로 (길게 누르면 재생)
+    private func loadLiveIfNeeded() {
+        guard isLivePhoto, liveEnabled, livePhotoView == nil, view.bounds.width > 0 else { return }
+        let live = PHLivePhotoView(frame: mediaView.bounds)
+        live.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        live.contentMode = .scaleAspectFit
+        live.backgroundColor = .clear
+        mediaView.addSubview(live)
+        livePhotoView = live
+
+        let scale = traitCollection.displayScale
+        let target = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
+        let options = PHLivePhotoRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.isNetworkAccessAllowed = true
+        liveRequestID = PHImageManager.default().requestLivePhoto(for: asset, targetSize: target, contentMode: .aspectFit,
+                                                                  options: options) { [weak self] livePhoto, _ in
+            DispatchQueue.main.async {
+                guard let self, let livePhoto else { return }
+                self.liveRequestID = PHInvalidImageRequestID
+                self.livePhotoView?.livePhoto = livePhoto
+                self.playHintIfNeeded()
+            }
+        }
+    }
+
+    /// 순정처럼 사진이 나타날 때 짧게 한 번 움직임
+    private func playHintIfNeeded() {
+        guard isActive, liveEnabled, !hintPlayed, let live = livePhotoView, live.livePhoto != nil else { return }
+        hintPlayed = true
+        live.startPlayback(with: .hint)
+    }
+
+    /// Live 켬/끔 (사진 자체는 안 바꿈. 이 앱에서만 기억)
+    func setLiveEnabled(_ on: Bool) {
+        liveEnabled = on
+        if on {
+            livePhotoView?.isHidden = false
+            loadLiveIfNeeded()
+            if isActive, let live = livePhotoView, live.livePhoto != nil {
+                live.startPlayback(with: .hint)
+            }
+        } else {
+            livePhotoView?.stopPlayback()
+            livePhotoView?.isHidden = true
+        }
+    }
+
+    // MARK: - 영상 (화면 안에서 바로 재생)
+
+    private func loadVideoIfNeeded() {
+        guard isVideo, isViewLoaded, player == nil, videoRequestID == PHInvalidImageRequestID, !videoFailed else { return }
+        spinner.startAnimating()
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .automatic
+        videoRequestID = PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { [weak self] item, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.videoRequestID = PHInvalidImageRequestID
+                self.spinner.stopAnimating()
+                guard let item else {
+                    self.videoFailed = true
+                    self.onPlaybackChange?()
+                    return
+                }
+                self.attachPlayer(item)
+            }
+        }
+    }
+
+    private func attachPlayer(_ item: AVPlayerItem) {
+        guard player == nil else { return }
+        let player = AVPlayer(playerItem: item)
+        player.isMuted = AssetPageViewController.videoMuted
+        player.actionAtItemEnd = .pause
+        let playerView = PlayerView(frame: mediaView.bounds)
+        playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        playerView.isUserInteractionEnabled = false
+        playerView.backgroundColor = .clear
+        playerView.playerLayer.videoGravity = .resizeAspect
+        playerView.playerLayer.player = player
+        mediaView.addSubview(playerView)
+        self.playerView = playerView
+        self.player = player
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item,
+                                                             queue: .main) { [weak self] _ in
+            self?.onPlaybackChange?()
+        }
+        if isActive { play() }
+        onPlaybackChange?()
+    }
+
+    private func configureAudioSession() {
+        // 소리를 켜면 무음 스위치와 상관없이 들리게, 끄면 다른 앱 소리를 끊지 않게
+        if AssetPageViewController.videoMuted {
+            try? AVAudioSession.sharedInstance().setCategory(.ambient)
+        } else {
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+        }
+    }
+
+    func play() {
+        guard let player else {
+            // 불러오다 실패했으면 다시
+            videoFailed = false
+            loadVideoIfNeeded()
+            return
+        }
+        configureAudioSession()
+        if let item = player.currentItem {
+            let total = item.duration.seconds
+            if total.isFinite, total > 0, player.currentTime().seconds >= total - 0.05 {
+                player.seek(to: .zero)
+            }
+        }
+        player.play()
+        onPlaybackChange?()
+    }
+
+    func pausePlayback() {
+        player?.pause()
+        onPlaybackChange?()
+    }
+
+    func togglePlay() {
+        if isPlaying {
+            pausePlayback()
+        } else {
+            play()
+        }
+    }
+
+    func applyMute() {
+        player?.isMuted = AssetPageViewController.videoMuted
+        if isPlaying { configureAudioSession() }
+    }
+
+    /// 0...1 자리로 이동
+    func seek(fraction: Double) {
+        guard let player, let item = player.currentItem else { return }
+        let total = item.duration.seconds
+        guard total.isFinite, total > 0 else { return }
+        let time = CMTime(seconds: total * min(1, max(0, fraction)), preferredTimescale: 600)
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    // MARK: - 확대 · 누르기
+
     func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-        imageView
+        scrollView === zoomScroll ? mediaView : nil
+    }
+
+    /// 정보를 연 채 맨 위에서 아래로 당기면 정보를 닫음
+    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint,
+                                   targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+        guard scrollView === pageScroll, infoProgress >= 1 else { return }
+        let y = scrollView.contentOffset.y
+        if y < -50 || (y < 0 && velocity.y < -0.5) {
+            targetContentOffset.pointee = .zero
+            DispatchQueue.main.async { [weak self] in
+                self?.onInfoPullDown?()
+            }
+        }
     }
 
     @objc private func doubleTapped(_ gesture: UITapGestureRecognizer) {
-        guard asset.mediaType != .video else { return }
-        if scrollView.zoomScale > 1.01 {
-            scrollView.setZoomScale(1, animated: true)
+        guard !isVideo, infoProgress <= 0 else { return }
+        if isZoomed {
+            zoomScroll.setZoomScale(1, animated: true)
         } else {
-            let point = gesture.location(in: imageView)
+            let point = gesture.location(in: mediaView)
             let targetScale: CGFloat = 2.5
-            let width = scrollView.bounds.width / targetScale
-            let height = scrollView.bounds.height / targetScale
-            scrollView.zoom(to: CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height), animated: true)
+            let width = zoomScroll.bounds.width / targetScale
+            let height = zoomScroll.bounds.height / targetScale
+            zoomScroll.zoom(to: CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height), animated: true)
         }
     }
 
     @objc private func singleTapped() {
         onSingleTap?()
-    }
-
-    @objc private func play() {
-        guard !loadingVideo else { return }
-        loadingVideo = true
-        // 무음 스위치가 켜져 있어도 영상 소리가 나게
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-        let options = PHVideoRequestOptions()
-        options.isNetworkAccessAllowed = true
-        options.deliveryMode = .automatic
-        PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { [weak self] item, _ in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.loadingVideo = false
-                guard let item, self.presentedViewController == nil else { return }
-                let player = AVPlayerViewController()
-                player.player = AVPlayer(playerItem: item)
-                self.present(player, animated: true) {
-                    player.player?.play()
-                }
-            }
-        }
     }
 }
 
@@ -176,6 +540,95 @@ final class VerticalPanGate: NSObject, UIGestureRecognizerDelegate {
     }
 }
 
+// MARK: - 썸네일 줄
+
+/// 순정처럼: 좁은 세로 조각들이 줄지어 있고, 지금 사진만 원래 비율에 가깝게 넓어지고 양옆이 더 벌어짐.
+/// focus(소수)를 따라 넓어지는 칸이 부드럽게 옮겨 감. 스크롤 위치 = lead + focus × step (곧은 관계)
+final class StripLayout: UICollectionViewLayout {
+    var count = 0
+    var aspect: (Int) -> CGFloat = { _ in 1 }
+    var focus: CGFloat = 0
+
+    let itemHeight: CGFloat = 34
+    let baseWidth: CGFloat = 21
+    let gap: CGFloat = 2
+    let focusGap: CGFloat = 7
+    var step: CGFloat { baseWidth + gap }
+    var maxWide: CGFloat { itemHeight * 1.7 }
+    /// 맨 앞 칸 앞의 여유 (넓어진 칸이 앞으로 밀려도 0 아래로 안 가게)
+    var lead: CGFloat { (maxWide + focusGap * 2) * 2 }
+
+    /// focus 가 가리키는 점의 가로 자리 (이 점이 줄의 한가운데에 옴)
+    func anchor(for focus: CGFloat) -> CGFloat {
+        lead + focus * step
+    }
+
+    private func wide(_ index: Int) -> CGFloat {
+        guard index >= 0, index < count else { return baseWidth }
+        return min(max(baseWidth, aspect(index) * itemHeight), maxWide)
+    }
+
+    override var collectionViewContentSize: CGSize {
+        CGSize(width: anchor(for: CGFloat(max(0, count - 1))) + lead, height: collectionView?.bounds.height ?? itemHeight)
+    }
+
+    func frame(for index: Int) -> CGRect {
+        let f = min(max(0, focus), CGFloat(max(0, count - 1)))
+        let k = Int(floor(f))
+        let s = f - CGFloat(k)
+        let widthK = baseWidth + (wide(k) - baseWidth) * (1 - s)
+        let widthNext = baseWidth + (wide(k + 1) - baseWidth) * s
+        // k 와 k+1 의 가운데 사이 거리 (넓어진 쪽의 여백 포함)
+        let distance = widthK / 2 + gap + focusGap + widthNext / 2
+        let centerK = anchor(for: f) - s * distance
+        let xK = centerK - widthK / 2
+        let xNext = centerK + distance - widthNext / 2
+        let height = collectionView?.bounds.height ?? itemHeight
+        let y = ((height - itemHeight) / 2).rounded()
+        let x: CGFloat
+        let width: CGFloat
+        if index == k {
+            x = xK
+            width = widthK
+        } else if index < k {
+            x = xK - focusGap * (1 - s) - CGFloat(k - index) * step
+            width = baseWidth
+        } else if index == k + 1 {
+            x = xNext
+            width = widthNext
+        } else {
+            x = xNext + widthNext + focusGap * s + gap + CGFloat(index - k - 2) * step
+            width = baseWidth
+        }
+        return CGRect(x: x, y: y, width: width, height: itemHeight)
+    }
+
+    private func attributes(for index: Int) -> UICollectionViewLayoutAttributes {
+        let attributes = UICollectionViewLayoutAttributes(forCellWith: IndexPath(item: index, section: 0))
+        attributes.frame = frame(for: index)
+        return attributes
+    }
+
+    override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
+        guard count > 0 else { return [] }
+        // 넓어진 칸 때문에 바둑판 자리에서 벗어나는 만큼 넉넉히
+        let slack = (maxWide + focusGap * 2) * 2 + step
+        let first = max(0, Int(floor((rect.minX - lead - slack) / step)))
+        let last = min(count - 1, Int(ceil((rect.maxX - lead + slack) / step)))
+        guard first <= last else { return [] }
+        return (first...last).map { attributes(for: $0) }
+    }
+
+    override func layoutAttributesForItem(at indexPath: IndexPath) -> UICollectionViewLayoutAttributes? {
+        guard indexPath.item >= 0, indexPath.item < count else { return nil }
+        return attributes(for: indexPath.item)
+    }
+
+    override func shouldInvalidateLayout(forBoundsChange newBounds: CGRect) -> Bool {
+        newBounds.size != collectionView?.bounds.size
+    }
+}
+
 /// 사진 상세 아래의 작은 썸네일 줄. 옆으로 밀거나 눌러서 다른 사진으로
 final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDelegate {
     private final class ThumbCell: UICollectionViewCell {
@@ -187,7 +640,8 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
             super.init(frame: frame)
             imageView.contentMode = .scaleAspectFill
             imageView.clipsToBounds = true
-            imageView.layer.cornerRadius = 3
+            imageView.layer.cornerRadius = 4
+            imageView.layer.cornerCurve = .continuous
             imageView.backgroundColor = .secondarySystemBackground
             imageView.frame = contentView.bounds
             imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -209,27 +663,39 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
     }
 
     var assets: [PHAsset] = [] {
-        didSet { collectionView.reloadData() }
+        didSet {
+            layout.count = assets.count
+            collectionView.reloadData()
+            applyFocus(focus)
+        }
     }
     /// 사용자가 줄을 밀거나 눌러서 고른 사진
     var onPick: ((Int) -> Void)?
+    /// 사용자가 줄을 끌거나 줄이 미끄러지는 중인지 (이때는 밖에서 위치를 안 바꿈)
+    private(set) var isUserDriving = false
 
-    private let itemSize = CGSize(width: 30, height: 40)
-    private let spacing: CGFloat = 2
+    private let layout: StripLayout
     private let collectionView: UICollectionView
-    private var index = 0
-    private var userDriven = false
+    private var focus: CGFloat = 0
+    private var lastPicked = -1
 
     override init(frame: CGRect) {
-        let layout = UICollectionViewFlowLayout()
-        layout.scrollDirection = .horizontal
-        layout.itemSize = CGSize(width: 30, height: 40)
-        layout.minimumLineSpacing = 2
-        layout.minimumInteritemSpacing = 0
-        collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
+        let stripLayout = StripLayout()
+        layout = stripLayout
+        collectionView = UICollectionView(frame: .zero, collectionViewLayout: stripLayout)
         super.init(frame: frame)
+        stripLayout.aspect = { [weak self] index in
+            guard let self, index >= 0, index < self.assets.count else { return 1 }
+            let asset = self.assets[index]
+            guard asset.pixelWidth > 0, asset.pixelHeight > 0 else { return 1 }
+            return CGFloat(asset.pixelWidth) / CGFloat(asset.pixelHeight)
+        }
         collectionView.backgroundColor = .clear
         collectionView.showsHorizontalScrollIndicator = false
+        collectionView.contentInsetAdjustmentBehavior = .never
+        collectionView.alwaysBounceHorizontal = true
+        collectionView.decelerationRate = .fast
+        collectionView.scrollsToTop = false
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(ThumbCell.self, forCellWithReuseIdentifier: "thumb")
@@ -240,24 +706,41 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
         fatalError("init(coder:) has not been implemented")
     }
 
-    private var sideInset: CGFloat { max(0, (bounds.width - itemSize.width) / 2) }
-
     override func layoutSubviews() {
         super.layoutSubviews()
         guard collectionView.frame != bounds else { return }
         collectionView.frame = bounds
         // 맨 처음·맨 끝 사진도 가운데에 올 수 있게
-        collectionView.contentInset = UIEdgeInsets(top: 0, left: sideInset, bottom: 0, right: sideInset)
-        select(index, animated: false)
+        let half = bounds.width / 2
+        collectionView.contentInset = UIEdgeInsets(top: 0, left: half, bottom: 0, right: half)
+        layout.invalidateLayout()
+        applyFocus(focus)
     }
 
-    /// 지금 사진을 가운데로
-    func select(_ newIndex: Int, animated: Bool) {
+    private func applyFocus(_ value: CGFloat) {
         guard !assets.isEmpty else { return }
-        index = min(max(0, newIndex), assets.count - 1)
+        focus = min(max(0, value), CGFloat(assets.count - 1))
+        layout.focus = focus
+        layout.invalidateLayout()
         guard bounds.width > 0 else { return }
-        let x = CGFloat(index) * (itemSize.width + spacing) - sideInset
-        collectionView.setContentOffset(CGPoint(x: x, y: 0), animated: animated)
+        collectionView.contentOffset = CGPoint(x: layout.anchor(for: focus) - bounds.width / 2, y: 0)
+    }
+
+    /// 넘기는 동안은 소수(예: 3.4)로 불러서 넓어지는 칸이 따라오게
+    func setFocus(_ value: CGFloat, animated: Bool) {
+        guard !isUserDriving, !assets.isEmpty else { return }
+        lastPicked = Int(value.rounded())
+        if abs(value - focus) < 0.0001 && collectionView.contentOffset.x == layout.anchor(for: focus) - bounds.width / 2 {
+            return
+        }
+        if animated && window != nil {
+            UIView.animate(withDuration: 0.3, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: {
+                self.applyFocus(value)
+                self.collectionView.layoutIfNeeded()
+            }, completion: nil)
+        } else {
+            applyFocus(value)
+        }
     }
 
     func numberOfSections(in collectionView: UICollectionView) -> Int { 1 }
@@ -271,7 +754,7 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
         let asset = assets[indexPath.item]
         let id = asset.localIdentifier
         cell.assetID = id
-        cell.requestID = Thumbs.manager.requestImage(for: asset, targetSize: CGSize(width: 90, height: 120), contentMode: .aspectFill,
+        cell.requestID = Thumbs.manager.requestImage(for: asset, targetSize: CGSize(width: 120, height: 120), contentMode: .aspectFill,
                                                      options: Thumbs.options) { [weak cell] image, _ in
             guard let cell, cell.assetID == id, let image else { return }
             cell.imageView.image = image
@@ -280,54 +763,190 @@ final class ScrubberView: UIView, UICollectionViewDataSource, UICollectionViewDe
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        guard indexPath.item != index else { return }
-        select(indexPath.item, animated: true)
+        collectionView.deselectItem(at: indexPath, animated: false)
+        isUserDriving = false
+        let index = indexPath.item
+        setFocus(CGFloat(index), animated: true)
         onPick?(index)
     }
 
+    private func focusValue(forOffset x: CGFloat) -> CGFloat {
+        let raw = (x + bounds.width / 2 - layout.lead) / layout.step
+        return min(max(0, raw), CGFloat(max(0, assets.count - 1)))
+    }
+
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        userDriven = true
+        isUserDriving = true
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard userDriven, !assets.isEmpty else { return }
-        let raw = (scrollView.contentOffset.x + sideInset) / (itemSize.width + spacing)
-        let centered = min(max(0, Int(raw.rounded())), assets.count - 1)
-        if centered != index {
-            index = centered
-            onPick?(centered)
+        guard isUserDriving, !assets.isEmpty, bounds.width > 0 else { return }
+        let value = focusValue(forOffset: scrollView.contentOffset.x)
+        focus = value
+        layout.focus = value
+        layout.invalidateLayout()
+        let index = Int(value.rounded())
+        if index != lastPicked {
+            lastPicked = index
+            onPick?(index)
         }
     }
 
+    /// 손을 떼면 칸 위에 정확히 멈추게
+    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint,
+                                   targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+        guard !assets.isEmpty, bounds.width > 0 else { return }
+        let index = focusValue(forOffset: targetContentOffset.pointee.x).rounded()
+        targetContentOffset.pointee.x = layout.anchor(for: index) - bounds.width / 2
+    }
+
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        if !decelerate { settle() }
+        if !decelerate { finishUserDrive() }
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-        settle()
+        finishUserDrive()
     }
 
-    private func settle() {
-        guard userDriven else { return }
-        userDriven = false
-        select(index, animated: true)
+    private func finishUserDrive() {
+        guard isUserDriving else { return }
+        isUserDriving = false
+        setFocus(focus.rounded(), animated: true)
     }
 }
 
-/// 좌우로 넘겨 보는 화면. 순정 사진 앱처럼 위에 날짜·시간, 아래에 썸네일 줄과 막대.
-/// 아래로 끌면 닫히고(확대 전환), 위로 끌면 사진이 올라가며 아래에 정보가 나옴
+// MARK: - 영상 조절 막대
+
+/// 영상일 때 썸네일 줄 아래(아래 막대 바로 위)에 나오는 재생/멈춤 · 시간 · 소리 막대
+final class VideoControlsView: UIView {
+    private let playButton = UIButton(type: .system)
+    private let muteButton = UIButton(type: .system)
+    private let slider = UISlider()
+    private let elapsedLabel = UILabel()
+    private let remainingLabel = UILabel()
+
+    var onPlayPause: (() -> Void)?
+    var onMute: (() -> Void)?
+    var onScrubBegin: (() -> Void)?
+    var onScrub: ((Float) -> Void)?
+    var onScrubEnd: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        let background = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
+        background.layer.cornerRadius = 22
+        background.layer.cornerCurve = .continuous
+        background.clipsToBounds = true
+        background.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(background)
+
+        let symbol = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        playButton.setPreferredSymbolConfiguration(symbol, forImageIn: .normal)
+        playButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
+        playButton.tintColor = .label
+        playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
+        muteButton.setPreferredSymbolConfiguration(symbol, forImageIn: .normal)
+        muteButton.setImage(UIImage(systemName: "speaker.wave.2.fill"), for: .normal)
+        muteButton.tintColor = .label
+        muteButton.addTarget(self, action: #selector(muteTapped), for: .touchUpInside)
+
+        for label in [elapsedLabel, remainingLabel] {
+            label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+            label.textColor = .secondaryLabel
+            label.setContentHuggingPriority(.required, for: .horizontal)
+            label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
+        elapsedLabel.text = "0:00"
+        remainingLabel.text = "-0:00"
+
+        slider.minimumValue = 0
+        slider.maximumValue = 1
+        slider.isContinuous = true
+        slider.minimumTrackTintColor = .label
+        slider.addTarget(self, action: #selector(sliderBegan), for: .touchDown)
+        slider.addTarget(self, action: #selector(sliderChanged), for: .valueChanged)
+        slider.addTarget(self, action: #selector(sliderEnded), for: [.touchUpInside, .touchUpOutside, .touchCancel])
+
+        let row = UIStackView(arrangedSubviews: [playButton, elapsedLabel, slider, remainingLabel, muteButton])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+        background.contentView.addSubview(row)
+        NSLayoutConstraint.activate([
+            background.topAnchor.constraint(equalTo: topAnchor),
+            background.bottomAnchor.constraint(equalTo: bottomAnchor),
+            background.leadingAnchor.constraint(equalTo: leadingAnchor),
+            background.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: background.contentView.topAnchor),
+            row.bottomAnchor.constraint(equalTo: background.contentView.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: background.contentView.leadingAnchor, constant: 8),
+            row.trailingAnchor.constraint(equalTo: background.contentView.trailingAnchor, constant: -8),
+            playButton.widthAnchor.constraint(equalToConstant: 36),
+            muteButton.widthAnchor.constraint(equalToConstant: 36),
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private static func clock(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded(.down)))
+        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
+        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
+    }
+
+    func update(elapsed: Double, total: Double, playing: Bool, muted: Bool, ready: Bool, scrubbing: Bool) {
+        playButton.setImage(UIImage(systemName: playing ? "pause.fill" : "play.fill"), for: .normal)
+        muteButton.setImage(UIImage(systemName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill"), for: .normal)
+        slider.isEnabled = ready
+        elapsedLabel.text = VideoControlsView.clock(elapsed)
+        remainingLabel.text = "-" + VideoControlsView.clock(max(0, total - elapsed))
+        if !scrubbing {
+            slider.value = total > 0 ? Float(min(1, max(0, elapsed / total))) : 0
+        }
+    }
+
+    @objc private func playTapped() { onPlayPause?() }
+    @objc private func muteTapped() { onMute?() }
+    @objc private func sliderBegan() { onScrubBegin?() }
+    @objc private func sliderChanged() { onScrub?(slider.value) }
+    @objc private func sliderEnded() { onScrubEnd?() }
+}
+
+// MARK: - 보기 화면
+
+/// 좌우로 넘겨 보는 화면. 순정 사진 앱처럼 위에 장소(또는 날짜)·시간, 아래에 썸네일 줄과 막대.
+/// 아래로 끌면 닫히고(확대 전환), 위로 끌면 사진이 위쪽을 꽉 채우며 아래에 정보가 이어짐
 final class ViewerViewController: UIPageViewController, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
     private var assets: [PHAsset]
+    private var indexByID: [String: Int]
     private var currentID: String
     private let sourceAlbumID: String?
     private var chromeHidden = false
     private let panGate = VerticalPanGate()
-    private weak var pannedView: UIView?   // 끌기 시작할 때 잡은 사진 화면
+    private weak var pannedPage: AssetPageViewController?   // 끌기 시작할 때 잡은 사진 화면
+    private var panDismissing = false
 
+    /// 바탕 (우리 view 는 투명. 확대 전환 때 사진만 커지고 바탕은 서서히 나타나게)
+    private let backdrop = UIView()
     private let scrubber = ScrubberView()
-    private let infoController = InfoViewController()
+    private var scrubberBottom: NSLayoutConstraint?
+    private let liveBadge = UIButton(type: .system)
+    private let videoControls = VideoControlsView()
     private var infoShown = false
-    private var panStartedWithInfo = false
+    private var infoProgress: CGFloat = 0
+    private var pagingObservation: NSKeyValueObservation?
+
+    private weak var videoPage: AssetPageViewController?
+    private var timeObserver: Any?
+    private weak var observedPlayer: AVPlayer?
+    private var scrubbingVideo = false
+    private var resumeAfterScrub = false
+
+    /// 화면이 아직 안 만들어졌을 때 확대 전환이 쓸 크기 (여는 쪽에서 채움)
+    var fallbackBounds: CGRect = .zero
 
     private lazy var shareItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: self, action: #selector(shareCurrent))
     private lazy var favoriteItem = UIBarButtonItem(image: UIImage(systemName: "heart"), style: .plain, target: self, action: #selector(toggleFavorite))
@@ -335,23 +954,12 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     private lazy var albumItem = UIBarButtonItem(image: UIImage(systemName: "rectangle.stack.badge.plus"), style: .plain, target: self, action: #selector(addToAlbum))
     private lazy var deleteItem = UIBarButtonItem(image: UIImage(systemName: "trash"), style: .plain, target: self, action: #selector(deleteCurrent))
 
-    private let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "ko_KR")
-        formatter.dateFormat = "yyyy년 M월 d일"
-        return formatter
-    }()
-    private let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "ko_KR")
-        formatter.dateFormat = "a h:mm"
-        return formatter
-    }()
-    private let titleDateLabel = UILabel()
-    private let titleTimeLabel = UILabel()
+    private let titleTopLabel = UILabel()
+    private let titleBottomLabel = UILabel()
 
     init(assets: [PHAsset], index: Int, sourceAlbumID: String?) {
         self.assets = assets
+        self.indexByID = ViewerViewController.indexMap(assets)
         self.currentID = assets.indices.contains(index) ? assets[index].localIdentifier : (assets.first?.localIdentifier ?? "")
         self.sourceAlbumID = sourceAlbumID
         super.init(transitionStyle: .scroll, navigationOrientation: .horizontal, options: [.interPageSpacing: 16])
@@ -362,9 +970,32 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         fatalError("init(coder:) has not been implemented")
     }
 
+    deinit {
+        if let timeObserver, let observedPlayer {
+            observedPlayer.removeTimeObserver(timeObserver)
+        }
+    }
+
+    private static func indexMap(_ assets: [PHAsset]) -> [String: Int] {
+        var map: [String: Int] = [:]
+        map.reserveCapacity(assets.count)
+        for (index, asset) in assets.enumerated() {
+            map[asset.localIdentifier] = index
+        }
+        return map
+    }
+
+    override var prefersStatusBarHidden: Bool { infoShown }
+    override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { .fade }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = .clear
+        backdrop.backgroundColor = .systemBackground
+        backdrop.frame = view.bounds
+        backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.insertSubview(backdrop, at: 0)
+
         navigationItem.largeTitleDisplayMode = .never
         dataSource = self
         delegate = self
@@ -382,20 +1013,44 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
         scrubber.assets = assets
         scrubber.onPick = { [weak self] index in self?.jump(to: index) }
+        scrubber.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(scrubber)
 
-        addChild(infoController)
-        infoController.view.isHidden = true
-        view.addSubview(infoController.view)
-        infoController.didMove(toParent: self)
+        videoControls.isHidden = true
+        videoControls.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(videoControls)
+        setUpVideoControls()
+
+        liveBadge.isHidden = true
+        liveBadge.showsMenuAsPrimaryAction = true
+        liveBadge.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(liveBadge)
+
+        // 썸네일 줄은 아래 막대 바로 위. 안전 영역(아래 막대 포함)에 붙여서 처음부터 제자리에
+        let guide = view.safeAreaLayoutGuide
+        let stripBottom = scrubber.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -8)
+        scrubberBottom = stripBottom
+        NSLayoutConstraint.activate([
+            stripBottom,
+            scrubber.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrubber.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrubber.heightAnchor.constraint(equalToConstant: 40),
+            videoControls.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -8),
+            videoControls.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
+            videoControls.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            videoControls.heightAnchor.constraint(equalToConstant: 44),
+            liveBadge.topAnchor.constraint(equalTo: guide.topAnchor, constant: 8),
+            liveBadge.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
+        ])
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
         panGate.canBegin = { [weak self, weak pan] in
-            guard let self, let page = self.viewControllers?.first as? AssetPageViewController else { return false }
-            if page.isZoomed { return false }
-            // iOS 18 부터는 아래로 끌어 닫기를 시스템(확대 전환)이 함. 여기서는 위로 끌기와 정보 내리기만
-            if #available(iOS 18.0, *), !self.infoShown, let pan, pan.velocity(in: self.view).y > 0 {
-                return false
+            guard let self, let page = self.currentPage else { return false }
+            // 정보가 열려 있으면 사진 페이지 안의 스크롤이 맡음
+            if page.isZoomed || self.infoShown { return false }
+            // iOS 18 부터는 아래로 끌어 닫기를 시스템(확대 전환)이 함. 여기서는 위로 끌기만
+            if let pan, pan.velocity(in: self.view).y > 0 {
+                if #available(iOS 18.0, *) { return false }
             }
             return true
         }
@@ -403,16 +1058,48 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         pan.maximumNumberOfTouches = 1
         view.addGestureRecognizer(pan)
 
-        updateTitle()
+        observePaging()
+        pageDidChange(animated: false)
     }
 
-    /// 날짜·시간 두 줄을 둥근 알약 안에
+    /// 좌우로 넘기는 동안 썸네일 줄의 넓어진 칸이 손가락을 따라오게
+    private func observePaging() {
+        guard pagingObservation == nil, let scroll = pagingScrollView else { return }
+        pagingObservation = scroll.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+            self?.pagingScrolled()
+        }
+    }
+
+    private func pagingScrolled() {
+        guard isViewLoaded, !scrubber.isUserDriving, let focus = visibleFocus() else { return }
+        scrubber.setFocus(focus, animated: false)
+    }
+
+    /// 화면 가운데에 가장 가까운 사진 화면의 자리로 지금 위치(소수)를 셈
+    private func visibleFocus() -> CGFloat? {
+        let width = view.bounds.width
+        guard width > 0 else { return nil }
+        var best: (distance: CGFloat, focus: CGFloat)?
+        for child in children {
+            guard let page = child as? AssetPageViewController, page.isViewLoaded, page.view.window != nil,
+                  let index = indexByID[page.asset.localIdentifier] else { continue }
+            let frame = page.view.convert(page.view.bounds, to: view)
+            let distance = (frame.midX - view.bounds.midX) / (width + 16)
+            if best == nil || abs(distance) < abs(best?.distance ?? 0) {
+                best = (distance, CGFloat(index) - distance)
+            }
+        }
+        return best?.focus
+    }
+
+    /// 장소(또는 날짜)·시간 두 줄을 둥근 알약 안에
     private func setUpTitle() {
-        titleDateLabel.font = .systemFont(ofSize: 16, weight: .semibold)
-        titleDateLabel.textAlignment = .center
-        titleTimeLabel.font = .systemFont(ofSize: 12)
-        titleTimeLabel.textAlignment = .center
-        let stack = UIStackView(arrangedSubviews: [titleDateLabel, titleTimeLabel])
+        titleTopLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+        titleTopLabel.textAlignment = .center
+        titleTopLabel.lineBreakMode = .byTruncatingTail
+        titleBottomLabel.font = .systemFont(ofSize: 12)
+        titleBottomLabel.textAlignment = .center
+        let stack = UIStackView(arrangedSubviews: [titleTopLabel, titleBottomLabel])
         stack.axis = .vertical
         stack.alignment = .center
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -432,53 +1119,97 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         navigationItem.titleView = pill
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        // 썸네일 줄: 아래 막대 바로 위
-        let stripHeight: CGFloat = 40
-        scrubber.frame = CGRect(x: 0, y: view.bounds.height - view.safeAreaInsets.bottom - stripHeight - 10,
-                                width: view.bounds.width, height: stripHeight)
-        // 변형(transform)이 걸려 있어도 안전하게 크기와 중심으로 놓음
-        let height = panelHeight
-        infoController.view.bounds = CGRect(x: 0, y: 0, width: view.bounds.width, height: height)
-        infoController.view.center = CGPoint(x: view.bounds.midX, y: view.bounds.height - height / 2)
-        if !infoShown && pannedView == nil {
-            infoController.view.transform = CGAffineTransform(translationX: 0, y: height)
+    private func setUpVideoControls() {
+        videoControls.onPlayPause = { [weak self] in
+            self?.videoPage?.togglePlay()
+        }
+        videoControls.onMute = { [weak self] in
+            AssetPageViewController.videoMuted.toggle()
+            self?.videoPage?.applyMute()
+            self?.refreshVideoControls()
+        }
+        videoControls.onScrubBegin = { [weak self] in
+            guard let self, let page = self.videoPage else { return }
+            self.scrubbingVideo = true
+            self.resumeAfterScrub = page.isPlaying
+            if page.isPlaying { page.pausePlayback() }
+        }
+        videoControls.onScrub = { [weak self] value in
+            self?.videoPage?.seek(fraction: Double(value))
+        }
+        videoControls.onScrubEnd = { [weak self] in
+            guard let self else { return }
+            self.scrubbingVideo = false
+            if self.resumeAfterScrub { self.videoPage?.play() }
+            self.resumeAfterScrub = false
+            self.refreshVideoControls()
         }
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // 영상 재생 화면에서 돌아올 때도 숨김 상태를 그대로
-        navigationController?.setNavigationBarHidden(chromeHidden, animated: animated)
+        // 다른 화면에서 돌아올 때도 숨김 상태를 그대로
+        navigationController?.setNavigationBarHidden(chromeHidden || infoShown, animated: animated)
         navigationController?.setToolbarHidden(chromeHidden, animated: animated)
+        if isMovingToParent, animated, let coordinator = transitionCoordinator {
+            // 열릴 때: 사진만 썸네일에서 커지고 바탕과 줄·배지는 서서히
+            backdrop.alpha = 0
+            setChromeViewsAlpha(0)
+            coordinator.animate(alongsideTransition: { _ in
+                self.backdrop.alpha = 1
+                self.applyChromeAlpha()
+            }, completion: { _ in
+                self.backdrop.alpha = 1
+                self.applyChromeAlpha()
+            })
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if let index = currentIndex { scrubber.select(index, animated: false) }
+        observePaging()
         // 닫다가 취소했을 때 남은 변형을 지움
-        if !infoShown, let pageView = viewControllers?.first?.view {
-            pageView.transform = .identity
-            pageView.alpha = 1
-        }
+        if !infoShown { currentPage?.setDismissDrag(.identity) }
+        backdrop.alpha = 1
+        applyChromeAlpha()
+        if let index = currentIndex { scrubber.setFocus(CGFloat(index), animated: false) }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // 이 화면을 떠날 때만 원래대로 (영상 재생 화면이 위에 뜰 때는 그대로 둠)
-        if isMovingFromParent {
-            navigationController?.setNavigationBarHidden(false, animated: animated)
-            navigationController?.setToolbarHidden(true, animated: animated)
+        guard isMovingFromParent else { return }
+        navigationController?.setNavigationBarHidden(false, animated: animated)
+        navigationController?.setToolbarHidden(true, animated: animated)
+        if let coordinator = transitionCoordinator {
+            // 닫힐 때: 바탕이 사라지며 뒤의 격자가 보이고 사진만 썸네일로 줄어듦 (끌어서 닫을 때는 손가락을 따라)
+            coordinator.animate(alongsideTransition: { _ in
+                self.backdrop.alpha = 0
+                self.setChromeViewsAlpha(0)
+            }, completion: { context in
+                if context.isCancelled {
+                    self.backdrop.alpha = 1
+                    self.applyChromeAlpha()
+                }
+            })
         }
     }
 
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        // 아래 막대가 나타나고 사라질 때 썸네일 줄이 바로 따라가게
+        view.setNeedsLayout()
+    }
+
     private var currentIndex: Int? {
-        assets.firstIndex { $0.localIdentifier == currentID }
+        indexByID[currentID]
     }
 
     private var currentAsset: PHAsset? {
         currentIndex.map { assets[$0] }
+    }
+
+    private var currentPage: AssetPageViewController? {
+        viewControllers?.first as? AssetPageViewController
     }
 
     /// 지금 보고 있는 사진 (확대 전환이 돌아갈 칸을 찾는 데 씀)
@@ -486,27 +1217,175 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     /// 시스템의 '끌어내려 닫기'를 해도 되는지
     var allowsInteractiveDismiss: Bool {
-        if infoShown { return false }
-        if let page = viewControllers?.first as? AssetPageViewController, page.isZoomed { return false }
+        if infoShown || infoProgress > 0 { return false }
+        if let page = currentPage, page.isZoomed { return false }
         return true
     }
 
+    /// 확대 전환이 썸네일과 맞출 자리: 사진이 화면에 맞춰 보이는 곳 (흰 바탕 전체가 아니라)
+    func zoomAlignmentRect() -> CGRect {
+        let bounds = (isViewLoaded && view.bounds.width > 0) ? view.bounds : fallbackBounds
+        if isViewLoaded, let page = currentPage, page.isViewLoaded, page.view.bounds.width > 0 {
+            return page.mediaFrame(in: view)
+        }
+        guard let asset = currentAsset, asset.pixelWidth > 0, asset.pixelHeight > 0 else { return bounds }
+        return Geo.fit(CGSize(width: asset.pixelWidth, height: asset.pixelHeight), in: bounds)
+    }
+
     private func makePage(_ index: Int) -> AssetPageViewController {
-        let page = AssetPageViewController(asset: assets[index])
+        let asset = assets[index]
+        let page = AssetPageViewController(asset: asset, liveEnabled: !Prefs.liveOffAssets.contains(asset.localIdentifier))
         page.onSingleTap = { [weak self] in self?.tapped() }
+        page.onInfoPullDown = { [weak self] in self?.setInfo(false, animated: true) }
         return page
     }
 
+    /// 지금 사진이 바뀌었을 때 위·아래 표시를 맞춤
+    private func pageDidChange(animated: Bool) {
+        updateTitle()
+        updateLiveBadge()
+        attachVideoControls()
+        if let index = currentIndex { scrubber.setFocus(CGFloat(index), animated: animated) }
+        applyChromeAlpha()
+    }
+
+    /// 순정처럼: 위치가 있으면 장소 이름 / 날짜·시간, 없으면 날짜 / 시간
     private func updateTitle() {
-        if let date = currentAsset?.creationDate {
-            titleDateLabel.text = dateFormatter.string(from: date)
-            titleTimeLabel.text = timeFormatter.string(from: date)
-        } else {
-            titleDateLabel.text = " "
-            titleTimeLabel.text = " "
-        }
         let favorite = currentAsset?.isFavorite ?? false
         favoriteItem.image = UIImage(systemName: favorite ? "heart.fill" : "heart")
+        guard let asset = currentAsset, let date = asset.creationDate else {
+            titleTopLabel.text = " "
+            titleBottomLabel.text = " "
+            return
+        }
+        if let location = asset.location {
+            if let place = PlaceNames.shared.cachedName(location) {
+                titleTopLabel.text = place
+                titleBottomLabel.text = DateText.dayAndTime(date)
+                return
+            }
+            if !PlaceNames.shared.isKnown(location) {
+                // 이름은 뒤에서 알아보고, 그동안은 날짜·시간
+                let id = asset.localIdentifier
+                PlaceNames.shared.lookup(location) { [weak self] name in
+                    guard let self, name != nil, self.currentID == id else { return }
+                    self.updateTitle()
+                }
+            }
+        }
+        titleTopLabel.text = DateText.day(date)
+        titleBottomLabel.text = DateText.time(date)
+    }
+
+    // MARK: - Live 배지 (왼쪽 위 "LIVE ⌄")
+
+    private func updateLiveBadge() {
+        guard let asset = currentAsset, asset.mediaType == .image, asset.mediaSubtypes.contains(.photoLive) else {
+            liveBadge.isHidden = true
+            return
+        }
+        liveBadge.isHidden = false
+        let on = !Prefs.liveOffAssets.contains(asset.localIdentifier)
+        var config = UIButton.Configuration.gray()
+        config.image = UIImage(systemName: on ? "livephoto" : "livephoto.slash")
+        config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        config.imagePadding = 4
+        config.title = "LIVE"
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+            var outgoing = incoming
+            outgoing.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+            return outgoing
+        }
+        config.indicator = .popup
+        config.cornerStyle = .capsule
+        config.buttonSize = .mini
+        config.baseForegroundColor = .secondaryLabel
+        liveBadge.configuration = config
+        liveBadge.menu = UIMenu(children: [
+            UIAction(title: "Live", image: UIImage(systemName: "livephoto"), state: on ? .on : .off) { [weak self] _ in
+                self?.setLive(true)
+            },
+            UIAction(title: "Live 끔", image: UIImage(systemName: "livephoto.slash"), state: on ? .off : .on) { [weak self] _ in
+                self?.setLive(false)
+            },
+        ])
+    }
+
+    private func setLive(_ on: Bool) {
+        guard let asset = currentAsset else { return }
+        var off = Prefs.liveOffAssets
+        if on {
+            off.remove(asset.localIdentifier)
+        } else {
+            off.insert(asset.localIdentifier)
+        }
+        Prefs.liveOffAssets = off
+        currentPage?.setLiveEnabled(on)
+        updateLiveBadge()
+    }
+
+    // MARK: - 영상 막대
+
+    private func attachVideoControls() {
+        let page = currentPage
+        let isVideo = page?.isVideo == true
+        if videoPage !== page {
+            detachTimeObserver()
+            scrubbingVideo = false
+        }
+        videoPage = isVideo ? page : nil
+        videoControls.isHidden = !isVideo
+        // 영상이면 썸네일 줄을 영상 막대 위로
+        scrubberBottom?.constant = isVideo ? -(8 + 44 + 8) : -8
+        page?.onPlaybackChange = { [weak self, weak page] in
+            guard let self, let page, page === self.videoPage else { return }
+            self.attachTimeObserverIfNeeded()
+            self.refreshVideoControls()
+        }
+        attachTimeObserverIfNeeded()
+        refreshVideoControls()
+    }
+
+    private func attachTimeObserverIfNeeded() {
+        guard let player = videoPage?.player, observedPlayer !== player else { return }
+        detachTimeObserver()
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 10), queue: .main) { [weak self] _ in
+            self?.refreshVideoControls()
+        }
+        observedPlayer = player
+    }
+
+    private func detachTimeObserver() {
+        if let timeObserver, let observedPlayer {
+            observedPlayer.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        observedPlayer = nil
+    }
+
+    private func refreshVideoControls() {
+        guard let page = videoPage else { return }
+        let player = page.player
+        var total = page.asset.duration
+        if let seconds = player?.currentItem?.duration.seconds, seconds.isFinite, seconds > 0 {
+            total = seconds
+        }
+        var elapsed = player?.currentTime().seconds ?? 0
+        if !elapsed.isFinite { elapsed = 0 }
+        videoControls.update(elapsed: elapsed, total: total, playing: page.isPlaying,
+                             muted: AssetPageViewController.videoMuted, ready: player != nil, scrubbing: scrubbingVideo)
+    }
+
+    // MARK: - 위아래 표시 숨기기
+
+    private func setChromeViewsAlpha(_ alpha: CGFloat) {
+        scrubber.alpha = alpha
+        liveBadge.alpha = alpha
+        videoControls.alpha = alpha
+    }
+
+    private func applyChromeAlpha() {
+        setChromeViewsAlpha((chromeHidden ? 0 : 1) * (1 - infoProgress))
     }
 
     /// 썸네일 줄에서 고른 사진으로 바로 바꿈
@@ -515,7 +1394,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         if infoShown { setInfo(false, animated: false) }
         currentID = assets[index].localIdentifier
         setViewControllers([makePage(index)], direction: .forward, animated: false)
-        updateTitle()
+        pageDidChange(animated: false)
     }
 
     private func tapped() {
@@ -526,20 +1405,30 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         }
     }
 
-    private func toggleChrome() {
-        chromeHidden.toggle()
-        navigationController?.setNavigationBarHidden(chromeHidden, animated: true)
-        navigationController?.setToolbarHidden(chromeHidden, animated: true)
-        UIView.animate(withDuration: 0.2) {
-            self.view.backgroundColor = self.chromeHidden ? .black : .systemBackground
-            self.scrubber.alpha = self.chromeHidden ? 0 : 1
+    private func setChromeHidden(_ hidden: Bool, animated: Bool) {
+        guard chromeHidden != hidden else { return }
+        chromeHidden = hidden
+        navigationController?.setNavigationBarHidden(hidden, animated: animated)
+        navigationController?.setToolbarHidden(hidden, animated: animated)
+        let changes = {
+            self.backdrop.backgroundColor = self.chromeHidden ? .black : .systemBackground
+            self.applyChromeAlpha()
+        }
+        if animated {
+            UIView.animate(withDuration: 0.2, animations: changes)
+        } else {
+            changes()
         }
     }
 
-    // MARK: - 정보 (순정처럼: 사진이 위로 올라가고 그 아래에 정보)
+    private func toggleChrome() {
+        setChromeHidden(!chromeHidden, animated: true)
+    }
 
-    private var panelHeight: CGFloat {
-        max(260, view.bounds.height * 0.58)
+    // MARK: - 정보 (순정처럼: 사진이 위쪽을 꽉 채우고, 바로 아래에 정보가 한 장으로 이어짐)
+
+    private var infoDistance: CGFloat {
+        max(200, view.bounds.height * 0.4)
     }
 
     /// 좌우 넘기기를 맡는 안쪽 스크롤뷰. 세로로 끄는 동안과 정보가 떠 있는 동안은 잠금
@@ -547,123 +1436,103 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         view.subviews.compactMap { $0 as? UIScrollView }.first
     }
 
-    /// 정보가 다 올라왔을 때 사진을 얼마나 위로 올릴지.
-    /// 사진이 남는 자리보다 작으면 그 가운데에, 크면 사진 아래쪽이 정보 바로 위에 닿게
-    private func photoShift() -> CGFloat {
-        let total = view.bounds.height
-        let panel = panelHeight
-        var photoHeight = total
-        if let asset = currentAsset, asset.pixelWidth > 0 {
-            photoHeight = min(total, view.bounds.width * CGFloat(asset.pixelHeight) / CGFloat(asset.pixelWidth))
+    /// 0: 사진만 ~ 1: 정보. 사진 화면 안쪽과 위아래 표시만 바꿈 (페이지 화면 자체는 안 움직임)
+    private func applyInfo(_ progress: CGFloat, to page: AssetPageViewController?) {
+        infoProgress = progress
+        page?.setInfoProgress(progress)
+        applyChromeAlpha()
+        if let navigation = navigationController, !navigation.isNavigationBarHidden {
+            navigation.navigationBar.alpha = 1 - progress
         }
-        let centered = panel / 2
-        let bottomAligned = (total + photoHeight) / 2 - (total - panel)
-        return min(panel, max(centered, bottomAligned))
-    }
-
-    /// progress 0: 사진만, 1: 사진이 위로 올라가고 정보가 다 올라옴 (사진 크기는 그대로)
-    private func applyInfo(_ progress: CGFloat, to pageView: UIView) {
-        pageView.transform = CGAffineTransform(translationX: 0, y: -photoShift() * progress)
-        pageView.alpha = 1
-        infoController.view.transform = CGAffineTransform(translationX: 0, y: panelHeight * (1 - progress))
-        scrubber.alpha = chromeHidden ? 0 : 1 - progress
-    }
-
-    private func prepareInfo() {
-        if let asset = currentAsset {
-            infoController.show(asset)
-        }
-        infoController.view.isHidden = false
-        view.bringSubviewToFront(infoController.view)
     }
 
     private func setInfo(_ shown: Bool, animated: Bool) {
-        guard let pageView = viewControllers?.first?.view else { return }
-        if shown { prepareInfo() }
+        let page = currentPage
+        if shown && chromeHidden { setChromeHidden(false, animated: false) }
         infoShown = shown
         pagingScrollView?.isScrollEnabled = !shown
         infoItem.image = UIImage(systemName: shown ? "info.circle.fill" : "info.circle")
-        let finish = {
-            if !self.infoShown {
-                self.infoController.view.isHidden = true
-                pageView.transform = .identity
-            }
+        if !shown, !chromeHidden, let navigation = navigationController, navigation.isNavigationBarHidden {
+            // 위 막대를 투명하게 다시 꺼내 놓고 서서히 보이게
+            navigation.navigationBar.alpha = 0
+            navigation.setNavigationBarHidden(false, animated: false)
+        }
+        let target: CGFloat = shown ? 1 : 0
+        let finish: (Bool) -> Void = { _ in
+            guard self.infoShown == shown else { return }
+            if shown { self.navigationController?.setNavigationBarHidden(true, animated: false) }
+            self.navigationController?.navigationBar.alpha = 1
         }
         guard animated else {
-            applyInfo(shown ? 1 : 0, to: pageView)
-            finish()
+            applyInfo(target, to: page)
+            setNeedsStatusBarAppearanceUpdate()
+            finish(true)
             return
         }
-        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0.4,
-                       options: [.allowUserInteraction], animations: {
-            self.applyInfo(shown ? 1 : 0, to: pageView)
-        }, completion: { _ in
-            finish()
-        })
+        UIView.animate(withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0.2,
+                       options: [.allowUserInteraction, .beginFromCurrentState], animations: {
+            self.applyInfo(target, to: page)
+            self.setNeedsStatusBarAppearanceUpdate()
+        }, completion: finish)
     }
 
     @objc private func toggleInfo() {
         setInfo(!infoShown, animated: true)
     }
 
-    // MARK: - 세로로 끌기 (위: 정보. 아래: 정보 내리기 / iOS 17 에서는 닫기)
+    // MARK: - 세로로 끌기 (위: 정보 열기. 아래: iOS 17 에서는 닫기)
 
     @objc private func panned(_ gesture: UIPanGestureRecognizer) {
-        if gesture.state == .began {
-            pannedView = viewControllers?.first?.view
-            panStartedWithInfo = infoShown
+        let move = gesture.translation(in: view)
+        switch gesture.state {
+        case .began:
+            pannedPage = currentPage
+            panDismissing = gesture.velocity(in: view).y > 0
             // 끄는 동안 옆 사진으로 넘어가지 않게
             pagingScrollView?.isScrollEnabled = false
-            if !infoShown, let pageView = pannedView {
-                prepareInfo()
-                applyInfo(0, to: pageView)
-            }
-        }
-        guard let pageView = pannedView else { return }
-        let move = gesture.translation(in: view)
-        let height = panelHeight
-
-        switch gesture.state {
+            if !panDismissing && chromeHidden { setChromeHidden(false, animated: true) }
         case .changed:
-            if let page = viewControllers?.first as? AssetPageViewController, page.isZoomed {
-                return   // 끌다가 확대가 시작되면 그대로 둠
-            }
-            if panStartedWithInfo {
-                applyInfo(min(1, max(0, 1 - move.y / height)), to: pageView)
-            } else if move.y <= 0 {
-                applyInfo(min(1, -move.y / height), to: pageView)
-            } else {
-                // 아래로 끌기 (iOS 17: 직접 닫기)
-                infoController.view.transform = CGAffineTransform(translationX: 0, y: height)
-                let progress = min(1, move.y / 320)
+            guard let page = pannedPage, !page.isZoomed else { return }
+            if panDismissing {
+                let progress = min(1, max(0, move.y) / 320)
                 let scale = 1 - progress * 0.3
-                pageView.transform = CGAffineTransform(translationX: move.x * 0.6, y: move.y).scaledBy(x: scale, y: scale)
-                pageView.alpha = 1 - progress * 0.4
+                page.setDismissDrag(CGAffineTransform(translationX: move.x * 0.6, y: max(0, move.y)).scaledBy(x: scale, y: scale))
+                backdrop.alpha = 1 - progress
+                setChromeViewsAlpha(chromeHidden ? 0 : 1 - progress)
+            } else {
+                applyInfo(min(1, max(0, -move.y / infoDistance)), to: page)
             }
         case .ended:
             let speed = gesture.velocity(in: view).y
-            pannedView = nil
-            if panStartedWithInfo {
-                setInfo(!(move.y > 60 || speed > 700), animated: true)
-            } else if move.y <= 0 {
-                setInfo(-move.y > 60 || speed < -600, animated: true)
-            } else if move.y > 110 || (move.y > 30 && speed > 900) {
-                pagingScrollView?.isScrollEnabled = true
-                infoController.view.isHidden = true
-                navigationController?.popViewController(animated: true)
-            } else {
-                // 조금만 내렸다 놓음: 제자리로
-                infoShown = false
-                pagingScrollView?.isScrollEnabled = true
-                infoController.view.isHidden = true
-                UIView.animate(withDuration: 0.25) {
-                    pageView.transform = .identity
-                    pageView.alpha = 1
+            let page = pannedPage
+            pannedPage = nil
+            if panDismissing {
+                if move.y > 110 || (move.y > 30 && speed > 900) {
+                    navigationController?.popViewController(animated: true)
+                } else {
+                    // 조금만 내렸다 놓음: 제자리로
+                    pagingScrollView?.isScrollEnabled = true
+                    UIView.animate(withDuration: 0.25) {
+                        page?.setDismissDrag(.identity)
+                        self.backdrop.alpha = 1
+                        self.applyChromeAlpha()
+                    }
                 }
+            } else {
+                let open = (-move.y > 60 && speed < 400) || speed < -600
+                setInfo(open, animated: true)
             }
         case .cancelled, .failed:
-            pannedView = nil
-            setInfo(panStartedWithInfo, animated: true)
+            let page = pannedPage
+            pannedPage = nil
+            if panDismissing {
+                page?.setDismissDrag(.identity)
+                backdrop.alpha = 1
+                applyChromeAlpha()
+                pagingScrollView?.isScrollEnabled = true
+            } else {
+                setInfo(false, animated: true)
+            }
         default:
             break
         }
@@ -674,37 +1543,34 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     func pageViewController(_ pageViewController: UIPageViewController,
                             viewControllerBefore viewController: UIViewController) -> UIViewController? {
         guard let page = viewController as? AssetPageViewController,
-              let index = assets.firstIndex(where: { $0.localIdentifier == page.asset.localIdentifier }),
-              index > 0 else { return nil }
+              let index = indexByID[page.asset.localIdentifier], index > 0 else { return nil }
         return makePage(index - 1)
     }
 
     func pageViewController(_ pageViewController: UIPageViewController,
                             viewControllerAfter viewController: UIViewController) -> UIViewController? {
         guard let page = viewController as? AssetPageViewController,
-              let index = assets.firstIndex(where: { $0.localIdentifier == page.asset.localIdentifier }),
-              index + 1 < assets.count else { return nil }
+              let index = indexByID[page.asset.localIdentifier], index + 1 < assets.count else { return nil }
         return makePage(index + 1)
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
                             previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
-        // 넘어간 뒤 남아 있던 화면의 변형을 지움
-        for old in previousViewControllers {
-            old.view.transform = .identity
-            old.view.alpha = 1
+        // 넘어간 뒤 남아 있던 화면을 원래대로
+        for old in previousViewControllers where old !== viewControllers?.first {
+            (old as? AssetPageViewController)?.resetTransientState()
         }
-        guard completed, let page = viewControllers?.first as? AssetPageViewController else { return }
+        guard completed, let page = currentPage else { return }
         currentID = page.asset.localIdentifier
-        updateTitle()
-        if let index = currentIndex { scrubber.select(index, animated: true) }
+        pageDidChange(animated: true)
     }
 
     /// 사진이 목록에서 빠졌을 때 (지움·옮김). 그사이 다른 사진으로 넘겼으면 보던 사진은 그대로
     private func remove(id: String) {
-        guard let index = assets.firstIndex(where: { $0.localIdentifier == id }) else { return }
+        guard let index = indexByID[id] else { return }
         let wasCurrent = id == currentID
         assets.remove(at: index)
+        indexByID = ViewerViewController.indexMap(assets)
         if wasCurrent {
             if infoShown { setInfo(false, animated: false) }
             if assets.isEmpty {
@@ -714,10 +1580,9 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             let next = min(index, assets.count - 1)
             currentID = assets[next].localIdentifier
             setViewControllers([makePage(next)], direction: .forward, animated: false)
-            updateTitle()
         }
         scrubber.assets = assets
-        if let current = currentIndex { scrubber.select(current, animated: false) }
+        pageDidChange(animated: false)
     }
 
     // MARK: - 막대 버튼
@@ -735,7 +1600,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             guard ok, let self else { return }
             // PHAsset 은 바뀌지 않는 값이라 새로 받아 옴
             if let fresh = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject,
-               let at = self.assets.firstIndex(where: { $0.localIdentifier == id }) {
+               let at = self.indexByID[id], at < self.assets.count {
                 self.assets[at] = fresh
             }
             self.updateTitle()
@@ -768,277 +1633,5 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         Library.shared.delete([asset]) { [weak self] ok in
             if ok { self?.remove(id: id) }
         }
-    }
-}
-
-/// 사진 정보 (순정 사진 앱의 정보 화면 모양: 흰 바탕에 둥근 회색 카드)
-final class InfoViewController: UIViewController {
-    private struct Details {
-        var camera: String?
-        var lens: String?
-        var format: String?
-        var fileSize: Int?
-        var iso: String?
-        var focal: String?
-        var bias: String?
-        var aperture: String?
-        var shutter: String?
-    }
-
-    private let scrollView = UIScrollView()
-    private let stack = UIStackView()
-    private var asset: PHAsset?
-    private var details = Details()
-    private var token = 0
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = .systemBackground
-        scrollView.alwaysBounceVertical = true
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(scrollView)
-        stack.axis = .vertical
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.addSubview(stack)
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 14),
-            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -24),
-            stack.leadingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: scrollView.frameLayoutGuide.trailingAnchor, constant: -14),
-        ])
-        rebuild()
-    }
-
-    func show(_ asset: PHAsset) {
-        self.asset = asset
-        details = Details()
-        token += 1
-        if isViewLoaded {
-            rebuild()
-            scrollView.setContentOffset(.zero, animated: false)
-        }
-        loadDetails(asset, token: token)
-    }
-
-    /// 촬영 정보(카메라·렌즈·ISO…)와 파일 크기는 원본을 읽어야 알 수 있어서 따로 받아 옴
-    private func loadDetails(_ asset: PHAsset, token: Int) {
-        guard asset.mediaType == .image else { return }
-        let options = PHImageRequestOptions()
-        options.isNetworkAccessAllowed = true
-        options.deliveryMode = .highQualityFormat
-        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { [weak self] data, uti, _, _ in
-            guard let data else { return }
-            var found = Details()
-            found.fileSize = data.count
-            if let uti, let type = UTType(uti) {
-                found.format = (type.preferredFilenameExtension ?? "").uppercased()
-                if found.format == "JPG" { found.format = "JPEG" }
-            }
-            if let source = CGImageSourceCreateWithData(data as CFData, nil),
-               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
-                let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
-                let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
-                found.camera = (tiff?[kCGImagePropertyTIFFModel] as? String)?.trimmingCharacters(in: .whitespaces)
-                found.lens = (exif?[kCGImagePropertyExifLensModel] as? String)?.trimmingCharacters(in: .whitespaces)
-                if let iso = (exif?[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber])?.first {
-                    found.iso = "ISO \(iso.intValue)"
-                }
-                if let focal = exif?[kCGImagePropertyExifFocalLength] as? NSNumber {
-                    found.focal = "\(Int(focal.doubleValue.rounded())) mm"
-                }
-                if let bias = exif?[kCGImagePropertyExifExposureBiasValue] as? NSNumber {
-                    let value = bias.doubleValue
-                    found.bias = (value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)) + " ev"
-                }
-                if let aperture = exif?[kCGImagePropertyExifFNumber] as? NSNumber {
-                    found.aperture = "ƒ" + String(format: "%g", aperture.doubleValue)
-                }
-                if let time = exif?[kCGImagePropertyExifExposureTime] as? NSNumber, time.doubleValue > 0 {
-                    let value = time.doubleValue
-                    found.shutter = value < 1 ? "1/\(Int((1 / value).rounded())) s" : String(format: "%g s", value)
-                }
-            }
-            DispatchQueue.main.async {
-                guard let self, self.token == token else { return }
-                self.details = found
-                if self.isViewLoaded { self.rebuild() }
-            }
-        }
-    }
-
-    // MARK: - 카드 만들기
-
-    private func label(_ text: String, size: CGFloat = 17, weight: UIFont.Weight = .regular, color: UIColor = .label) -> UILabel {
-        let label = UILabel()
-        label.text = text
-        label.font = .systemFont(ofSize: size, weight: weight)
-        label.textColor = color
-        label.numberOfLines = 0
-        return label
-    }
-
-    private func padded(_ content: UIView) -> UIView {
-        let box = UIView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-        box.addSubview(content)
-        NSLayoutConstraint.activate([
-            content.topAnchor.constraint(equalTo: box.topAnchor, constant: 13),
-            content.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -13),
-            content.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 18),
-            content.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -18),
-        ])
-        return box
-    }
-
-    private func separator() -> UIView {
-        let line = UIView()
-        line.backgroundColor = .separator
-        line.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
-        return line
-    }
-
-    /// 줄들을 얇은 선으로 나눈 둥근 카드
-    private func card(_ rows: [UIView]) -> UIView {
-        let column = UIStackView()
-        column.axis = .vertical
-        for (index, row) in rows.enumerated() {
-            if index > 0 { column.addArrangedSubview(separator()) }
-            column.addArrangedSubview(row)
-        }
-        column.backgroundColor = .secondarySystemBackground
-        column.layer.cornerRadius = 24
-        column.layer.cornerCurve = .continuous
-        column.clipsToBounds = true
-        return column
-    }
-
-    private func badge(_ text: String) -> UIView {
-        let label = PaddedLabel()
-        label.text = text
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .secondaryLabel
-        label.backgroundColor = .tertiarySystemFill
-        label.layer.cornerRadius = 12
-        label.layer.masksToBounds = true
-        label.setContentHuggingPriority(.required, for: .horizontal)
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
-        return label
-    }
-
-    private func rebuild() {
-        for view in stack.arrangedSubviews {
-            stack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-        guard let asset else { return }
-        let isVideo = asset.mediaType == .video
-        let isScreenshot = asset.mediaSubtypes.contains(.photoScreenshot)
-        let resources = PHAssetResource.assetResources(for: asset)
-        let primaryType: PHAssetResourceType = isVideo ? .video : .photo
-        let primary = resources.first { $0.type == primaryType } ?? resources.first
-        let fileName = primary?.originalFilename ?? ""
-        let entry = Library.shared.classifier.entry(for: asset.localIdentifier)
-
-        // 1) 날짜 · 파일 이름 / 카메라 · 형식 / 렌즈 · 크기 / 촬영 값
-        var rows: [UIView] = []
-
-        let header = UIStackView()
-        header.axis = .vertical
-        header.spacing = 3
-        if let date = asset.creationDate {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "ko_KR")
-            formatter.dateFormat = "yyyy년 M월 d일 EEEE a h:mm"
-            header.addArrangedSubview(label(formatter.string(from: date)))
-        }
-        if !fileName.isEmpty {
-            header.addArrangedSubview(label((fileName as NSString).deletingPathExtension, color: .secondaryLabel))
-        }
-        rows.append(padded(header))
-
-        var cameraText = details.camera ?? ""
-        if cameraText.isEmpty {
-            if isScreenshot {
-                cameraText = "스크린샷"
-            } else if isVideo {
-                cameraText = entry?.cat == .recording ? "화면 녹화" : "동영상"
-            } else {
-                cameraText = "카메라 정보 없음"
-            }
-        }
-        var format = details.format ?? ""
-        if format.isEmpty { format = (fileName as NSString).pathExtension.uppercased() }
-        if format == "JPG" { format = "JPEG" }
-        let cameraRow = UIStackView(arrangedSubviews: [label(cameraText)])
-        cameraRow.axis = .horizontal
-        cameraRow.alignment = .center
-        cameraRow.spacing = 8
-        if !format.isEmpty { cameraRow.addArrangedSubview(badge(format)) }
-        rows.append(padded(cameraRow))
-
-        let megapixels = Double(asset.pixelWidth * asset.pixelHeight) / 1_000_000
-        var sizeParts = [megapixels >= 10 ? "\(Int(megapixels.rounded()))MP" : String(format: "%.1fMP", megapixels),
-                         "\(asset.pixelWidth) × \(asset.pixelHeight)"]
-        if let bytes = details.fileSize {
-            sizeParts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
-        }
-        if isVideo {
-            let total = Int(asset.duration.rounded())
-            sizeParts.append(String(format: "%d:%02d", total / 60, total % 60))
-        }
-        let lensColumn = UIStackView()
-        lensColumn.axis = .vertical
-        lensColumn.spacing = 3
-        if !isVideo {
-            lensColumn.addArrangedSubview(label(details.lens?.isEmpty == false ? details.lens! : "렌즈 정보 없음", color: .secondaryLabel))
-        }
-        lensColumn.addArrangedSubview(label(sizeParts.joined(separator: " • "), color: .secondaryLabel))
-        rows.append(padded(lensColumn))
-
-        if !isVideo {
-            let values = [details.iso, details.focal, details.bias, details.aperture, details.shutter]
-            let exifRow = UIStackView()
-            exifRow.axis = .horizontal
-            exifRow.distribution = .fillEqually
-            for value in values {
-                let item = label(value ?? "-", size: 14, color: .secondaryLabel)
-                item.textAlignment = .center
-                item.numberOfLines = 1
-                item.adjustsFontSizeToFitWidth = true
-                exifRow.addArrangedSubview(item)
-            }
-            rows.append(padded(exifRow))
-        }
-        stack.addArrangedSubview(card(rows))
-
-        // 2) 위치
-        if let location = asset.location {
-            let text = String(format: "위치  %.5f, %.5f", location.coordinate.latitude, location.coordinate.longitude)
-            stack.addArrangedSubview(card([padded(label(text))]))
-        }
-
-        // 3) 어디서 저장됐는지 (알 수 있을 때)
-        if let app = entry?.app {
-            stack.addArrangedSubview(card([padded(label(app + "에서 저장됨"))]))
-        } else if entry?.cat == .camera {
-            stack.addArrangedSubview(card([padded(label("카메라로 촬영"))]))
-        }
-
-        // 4) 들어 있는 앨범
-        let snapshot = Library.shared.snapshot
-        let id = asset.localIdentifier
-        var albums: [String] = []
-        for folder in snapshot.folders where folder.isUser {
-            if snapshot.items[folder.id]?.contains(where: { $0.localIdentifier == id }) == true {
-                albums.append(folder.title)
-            }
-        }
-        let albumText = albums.isEmpty ? "앨범 없음 (미분류)" : "앨범  " + albums.joined(separator: ", ")
-        stack.addArrangedSubview(card([padded(label(albumText, color: albums.isEmpty ? .secondaryLabel : .label))]))
     }
 }

@@ -83,6 +83,27 @@ enum Prefs {
         set { defaults.set(newValue, forKey: "gridColumns") }
     }
 
+    /// 앨범 안 사진 격자 칸 수 (순정처럼 기본 5. 보관함·미분류 탭은 gridColumns)
+    static var albumGridColumns: Int {
+        get {
+            let value = defaults.integer(forKey: "albumGridColumns")
+            return value > 0 ? value : 5
+        }
+        set { defaults.set(newValue, forKey: "albumGridColumns") }
+    }
+
+    /// 최신 항목 순으로 보는 앨범 ID (나머지는 순정처럼 오래된 항목 순)
+    static var newestFirstAlbums: Set<String> {
+        get { Set(defaults.stringArray(forKey: "newestFirstAlbums") ?? []) }
+        set { defaults.set(Array(newValue), forKey: "newestFirstAlbums") }
+    }
+
+    /// 'Live 끔' 으로 둔 사진 ID (사진 자체는 안 바꾸고 이 앱에서만)
+    static var liveOffAssets: Set<String> {
+        get { Set(defaults.stringArray(forKey: "liveOffAssets") ?? []) }
+        set { defaults.set(Array(newValue), forKey: "liveOffAssets") }
+    }
+
     /// 앨범 격자 칸 수 (기본 3)
     static var albumColumns: Int {
         get {

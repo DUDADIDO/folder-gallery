@@ -584,12 +584,12 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         if folder.isGroup {
             var result: [PHAsset] = []
             for album in snapshot.albums(under: folder.id) {
-                if let first = snapshot.items[album.id]?.first { result.append(first) }
+                if let cover = snapshot.cover(album.id) { result.append(cover) }
                 if result.count == 4 { break }
             }
             return result
         }
-        if let first = snapshot.items[folder.id]?.first { return [first] }
+        if let cover = snapshot.cover(folder.id) { return [cover] }
         return []
     }
 
@@ -743,7 +743,14 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         // 앨범은 카드에서 커지며 열림. 폴더는 순정처럼 오른쪽에서 밀려 들어옴
         if !folder.isGroup, #available(iOS 18.0, *) {
             let id = folder.id
-            next.preferredTransition = .zoom(sourceViewProvider: { [weak self] _ in
+            let options = UIViewController.Transition.ZoomOptions()
+            // 카드(정사각형)를 앨범 화면 맨 위의 정사각형 표지에 맞춤. 닫힐 때 끝에서 크기가 덜컥 바뀌지 않게
+            if let grid = next as? GridViewController {
+                options.alignmentRectProvider = { [weak grid] _ in
+                    grid?.zoomCoverRect() ?? .zero
+                }
+            }
+            next.preferredTransition = .zoom(options: options, sourceViewProvider: { [weak self] _ in
                 self?.cardView(forFolderID: id)
             })
         }
