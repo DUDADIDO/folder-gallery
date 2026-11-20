@@ -161,9 +161,21 @@ final class HeroHeaderView: UICollectionReusableView {
     var assetID: String?
     var requestID: PHImageRequestID = PHInvalidImageRequestID
 
+    /// 표지 위 글자(이름·앨범 모양·장수)의 투명도. 확대 전환 동안 카드처럼 사진만 남길 때 씀
+    var overlayAlpha: CGFloat {
+        get { titleLabel.alpha }
+        set {
+            titleLabel.alpha = newValue
+            countLabel.alpha = newValue
+            glyph.alpha = newValue
+        }
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         clipsToBounds = true
+        // 확대 전환 동안만 둥글게 함 (평소에는 0). 앨범 카드와 같은 매끄러운 모서리
+        layer.cornerCurve = .continuous
         backgroundColor = .systemGray5
         imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
@@ -223,11 +235,18 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private var reloadPending = false
     /// 선택 모드가 '밀어서 뒤로'를 막을 때 쓰는 이름표 (앨범 화면 자체가 막는 것과 따로)
     private let selectionSwipeToken = NSObject()
+    /// 화면 바탕. 확대 전환 동안 사라지게 하려고 화면·격자 자체의 바탕색 대신 따로 둠 (화면 자체는 건드리지 않음)
+    private let backdrop = UIView()
+    /// 확대 전환 동안 표지만 남긴 상태인지 (사진 칸·바탕·표지 글자를 숨기고 표지 모서리를 카드처럼 둥글게)
+    private var zoomCollapsed = false
 
     /// 이 화면이 보여 주는 앨범 ID ("all" = 보관함)
     var folderID: String { folder.id }
     /// 앨범 카드에서 확대 전환으로 열린 앨범 화면인지 (여는 쪽에서 정함)
     var opensWithZoom = false
+    /// 앨범 카드의 모서리 반지름 ÷ 카드 한 변 (여는 쪽이 실제 카드에서 재서 넣음).
+    /// 확대 전환 동안 표지 모서리를 표지 한 변 × 이 값으로 해서, 카드 크기로 줄었을 때 카드와 같은 모서리가 되게
+    var zoomCornerRatio: CGFloat = 0
 
     private lazy var shareItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: self, action: #selector(shareSelected))
     private lazy var moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis.circle"), menu: makeMoreMenu())
@@ -257,12 +276,17 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        // 바탕은 맨 아래 backdrop 이 그림. 확대 전환 동안 이것만 사라지면 표지 밖으로 뒤의 앨범 목록이 보임
+        view.backgroundColor = .clear
+        backdrop.backgroundColor = .systemBackground
+        backdrop.frame = view.bounds
+        backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(backdrop)
         navigationItem.largeTitleDisplayMode = isRoot ? .always : .never
 
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: makeLayout())
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        collectionView.backgroundColor = .systemBackground
+        collectionView.backgroundColor = .clear
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.prefetchDataSource = self
@@ -314,12 +338,15 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         navigationController?.setToolbarHidden(!selecting, animated: animated)
         holdReloadsDuringTransition()
         blockSwipeAnywhereIfAlbum()
+        expandCoverAlongsideOpening(animated: animated)
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // 전환을 취소하고 돌아왔을 때도 다시 막음
         blockSwipeAnywhereIfAlbum()
+        // 열림이 끝났거나 닫기를 취소하고 돌아옴: 숨긴 것이 남지 않게
+        if zoomCollapsed { setZoomCollapsed(false) }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -328,11 +355,84 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         navigationController?.setBackSwipe(blocked: nil, by: self)
         // 선택 모드인 채로 닫히면(앨범이 지워짐 등) 뒤 화면에 막힌 채로 남지 않게
         if isMovingFromParent { navigationController?.setBackSwipe(blocked: nil, by: selectionSwipeToken) }
+        collapseToCoverAlongsideClosing()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         if selecting { setSelecting(false) }
+        // 화면에서 내려간 뒤에 되돌려 둠 (다시 보일 때 숨긴 채로 남지 않게)
+        if zoomCollapsed { setZoomCollapsed(false) }
+    }
+
+    // MARK: - 확대 전환 동안 표지만 (카드가 커지고 줄어드는 것처럼)
+
+    /// 확대 전환은 이 화면 전체를 카드 크기로 줄이고 키움. 표지 밖(흰 바탕·사진 칸)이 카드 아래로 늘어져 보이다가
+    /// 마지막에 진짜 카드로 바뀌며 덜컥이지 않게, 전환 동안은 표지만 남기고 표지 모서리를 카드 비율대로 둥글게 함.
+    /// 표지가 맨 위 제자리에 있을 때만 (위로 넘겨 둔 격자는 표지가 화면 밖이라 숨기면 아무것도 안 남음)
+    private var coverIsInZoomRect: Bool {
+        guard opensWithZoom, !isRoot, isViewLoaded, collectionView != nil, !sections.isEmpty else { return false }
+        return collectionView.contentOffset.y <= -collectionView.adjustedContentInset.top + 1
+    }
+
+    /// 열릴 때: 표지만 있는 상태에서 시작해 전환과 함께 나머지가 나타나고 모서리가 펴짐
+    private func expandCoverAlongsideOpening(animated: Bool) {
+        guard animated, isMovingToParent, let coordinator = transitionCoordinator, coverIsInZoomRect else { return }
+        UIView.performWithoutAnimation {
+            setZoomCollapsed(true)
+            // 처음 보일 칸들을 지금 만들어 둠 (전환 도중에 만들어지는 칸이 바로 다 보이며 튀어나오지 않게)
+            view.layoutIfNeeded()
+        }
+        let queued = coordinator.animate(alongsideTransition: { _ in
+            self.setZoomCollapsed(false)
+        }, completion: { _ in
+            self.setZoomCollapsed(false)
+        })
+        if !queued {
+            UIView.performWithoutAnimation { setZoomCollapsed(false) }
+        }
+    }
+
+    /// 닫힐 때: 전환과 함께 표지만 남기고 모서리가 카드처럼 둥글어짐. 닫기를 취소하면 되돌림
+    private func collapseToCoverAlongsideClosing() {
+        guard isMovingFromParent, let coordinator = transitionCoordinator, coverIsInZoomRect else { return }
+        coordinator.animate(alongsideTransition: { _ in
+            self.setZoomCollapsed(true)
+        }, completion: { context in
+            if context.isCancelled {
+                UIView.performWithoutAnimation { self.setZoomCollapsed(false) }
+            }
+        })
+    }
+
+    private func setZoomCollapsed(_ on: Bool) {
+        zoomCollapsed = on
+        guard isViewLoaded, collectionView != nil else { return }
+        let alpha: CGFloat = on ? 0 : 1
+        backdrop.alpha = alpha
+        emptyLabel.alpha = alpha
+        for cell in collectionView.visibleCells {
+            applyZoomCollapse(to: cell)
+        }
+        let kind = UICollectionView.elementKindSectionHeader
+        for path in collectionView.indexPathsForVisibleSupplementaryElements(ofKind: kind) {
+            if let hero = collectionView.supplementaryView(forElementKind: kind, at: path) as? HeroHeaderView {
+                applyZoomCollapse(to: hero)
+            }
+        }
+    }
+
+    /// 칸 자체의 alpha 는 격자 배치가 다시 덮어쓰므로 contentView 를 씀 (새로 만들어지거나 다시 쓰이는 칸도 지금 상태로)
+    private func applyZoomCollapse(to cell: UICollectionViewCell) {
+        let alpha: CGFloat = zoomCollapsed ? 0 : 1
+        if cell.contentView.alpha != alpha { cell.contentView.alpha = alpha }
+    }
+
+    private func applyZoomCollapse(to hero: HeroHeaderView) {
+        hero.overlayAlpha = zoomCollapsed ? 0 : 1
+        let side = hero.bounds.width > 0 ? hero.bounds.width : zoomCoverRect().width
+        let radius = zoomCollapsed ? side * zoomCornerRatio : 0
+        if hero.layer.cornerRadius != radius { hero.layer.cornerRadius = radius }
     }
 
     /// 앨범 화면(카드에서 확대 전환으로 열림)에서는 iOS 26 의 '어디서나 밀어서 뒤로'를 끔.
@@ -600,6 +700,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if cell.assetID != id { cell.imageView.image = nil }
         cell.assetID = id
         cell.selecting = selecting
+        applyZoomCollapse(to: cell)
         cell.setDuration(asset.mediaType == .video ? asset.duration : nil)
         cell.requestID = Thumbs.manager.requestImage(for: asset, targetSize: thumbSize, contentMode: .aspectFill,
                                                      options: Thumbs.options) { [weak cell] image, _ in
@@ -615,6 +716,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             let hero = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: HeroHeaderView.reuse,
                                                                        for: indexPath) as! HeroHeaderView
             configureHero(hero)
+            applyZoomCollapse(to: hero)
             return hero
         }
         let header = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: DayHeaderView.reuse,
@@ -726,6 +828,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 미리 만들어 둔 셀은 visibleCells 에 없어서, 화면에 나올 때 선택 모드를 다시 맞춤
     func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
         (cell as? AssetCell)?.selecting = selecting
+        // 확대 전환 동안 새로 나오는 칸이 다 보이며 튀어나오지 않게, 끝난 뒤에는 숨긴 채로 남지 않게
+        applyZoomCollapse(to: cell)
+    }
+
+    func collectionView(_ collectionView: UICollectionView, willDisplaySupplementaryView view: UICollectionReusableView,
+                        forElementKind elementKind: String, at indexPath: IndexPath) {
+        if let hero = view as? HeroHeaderView { applyZoomCollapse(to: hero) }
     }
 
     func collectionView(_ collectionView: UICollectionView, didDeselectItemAt indexPath: IndexPath) {

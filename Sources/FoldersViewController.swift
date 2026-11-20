@@ -802,8 +802,13 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
             let id = folder.id
             let options = UIViewController.Transition.ZoomOptions()
             // 카드(정사각형)를 앨범 화면 맨 위의 정사각형 표지에 맞춤. 닫힐 때 끝에서 크기가 덜컥 바뀌지 않게
-            if let grid = next as? GridViewController {
+            let grid = next as? GridViewController
+            if let grid {
                 grid.opensWithZoom = true
+                // 전환 동안 표지 모서리를 이 카드와 같은 비율로 (목록 보기·자동 분류 카드는 비율이 다름)
+                if let card = (collectionView.cellForItem(at: indexPath) as? AlbumCell)?.cardView {
+                    grid.zoomCornerRatio = Self.cornerRatio(of: card)
+                }
                 options.alignmentRectProvider = { [weak grid] _ in
                     grid?.zoomCoverRect() ?? .zero
                 }
@@ -814,11 +819,22 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
                                                   velocity: ZoomGesture.point(context.velocity))
                 }
             }
-            next.preferredTransition = .zoom(options: options, sourceViewProvider: { [weak self] _ in
-                self?.cardView(forFolderID: id)
+            next.preferredTransition = .zoom(options: options, sourceViewProvider: { [weak self, weak grid] _ in
+                let card = self?.cardView(forFolderID: id)
+                // 닫힐 때 돌아갈 카드가 그사이 바뀌었을 수 있어 (회전 등) 그 카드에서 다시 잼
+                if let card, let grid, card.bounds.width > 0 {
+                    grid.zoomCornerRatio = FoldersViewController.cornerRatio(of: card)
+                }
+                return card
             })
         }
         navigationController?.pushViewController(next, animated: true)
+    }
+
+    /// 카드 모서리 반지름 ÷ 카드 한 변 (짧은 쪽). 크기를 아직 모르면 0
+    private static func cornerRatio(of card: UIView) -> CGFloat {
+        let side = min(card.bounds.width, card.bounds.height)
+        return side > 0 ? card.layer.cornerRadius / side : 0
     }
 
     /// 확대 전환이 시작하고 돌아올 자리 (그 앨범 카드)
