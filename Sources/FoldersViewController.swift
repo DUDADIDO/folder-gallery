@@ -421,6 +421,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // 아래 막대는 숨기고 탭 막대는 보이게 (어긋난 채로 남지 않게. 맞으면 건드리지 않음)
+        navigationController?.ensureBrowsingBars(of: self)
         if isLocked { authenticate() }
     }
 

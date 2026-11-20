@@ -371,4 +371,15 @@ extension UINavigationController {
             recognizer.isEnabled = strongest < BackSwipeBlock.anywhere.rawValue
         }
     }
+
+    /// 둘러보는 화면(격자·앨범 목록)이 다 보인 뒤의 안전장치: 아래 막대는 숨기고 탭 막대는 보이게.
+    /// 이미 맞으면 아무것도 안 함. screen 이 맨 위가 아니거나, 탭 막대를 스스로 숨기는 화면이 쌓여 있으면 건드리지 않음
+    func ensureBrowsingBars(of screen: UIViewController) {
+        guard topViewController === screen else { return }
+        if !isToolbarHidden { setToolbarHidden(true, animated: false) }
+        guard !viewControllers.contains(where: { $0.hidesBottomBarWhenPushed }) else { return }
+        if #available(iOS 18.0, *), let tabs = tabBarController, tabs.isTabBarHidden {
+            tabs.setTabBarHidden(false, animated: false)
+        }
+    }
 }

@@ -983,10 +983,6 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     /// 화면이 아직 안 만들어졌을 때 확대 전환이 쓸 크기 (여는 쪽에서 채움)
     var fallbackBounds: CGRect = .zero
-    /// 열릴 때 떠 둔 아래 탭 막대 그림 (여닫는 동안 탭 막대가 제자리에서 서서히 사라지고 나타나게)
-    var tabBarSnapshot: TabBarSnapshot?
-    /// 위 막대를 숨긴 채(사진만 보기) 닫혀서, 막대를 투명하게 꺼내 놓았는지 (전환이 서서히 보이게 함)
-    var navigationBarFadesIn = false
     /// 아래로 끌어 닫는 중인 우리 전환
     private var dismissDriver: PhotoTransitionAnimator?
 
@@ -1005,7 +1001,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         self.currentID = assets.indices.contains(index) ? assets[index].localIdentifier : (assets.first?.localIdentifier ?? "")
         self.sourceAlbumID = sourceAlbumID
         super.init(transitionStyle: .scroll, navigationOrientation: .horizontal, options: [.interPageSpacing: 16])
-        hidesBottomBarWhenPushed = true
+        // 아래 탭 막대는 iOS 18 부터 setTabBarHidden 으로 직접 숨기고 보임 (viewWillAppear·viewWillDisappear).
+        // 그 전 버전에서만 예전 방식
+        if #unavailable(iOS 18.0) {
+            hidesBottomBarWhenPushed = true
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -1192,17 +1192,27 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         super.viewWillAppear(animated)
         // 보는 동안은 '밀어서 뒤로'(가장자리·어디서나)를 끔. 옆으로 빨리 넘기는 것이 뒤로 가기로 잡히지 않게
         navigationController?.setBackSwipe(blocked: .all, by: self)
-        // 다른 화면에서 돌아올 때도 숨김 상태를 그대로.
-        // 격자에서 열릴 때(우리 사진 전환)는 막대를 밀어 올리지 않고 바로 꺼내 둠 — 투명도는 전환이 0 에서 1 로 바꿈
-        let slides = animated && !isInPhotoTransition
-        navigationController?.setNavigationBarHidden(chromeHidden || infoShown, animated: slides)
-        navigationController?.setToolbarHidden(chromeHidden, animated: slides)
+        // 다른 화면에서 돌아올 때도 숨김 상태를 그대로
+        navigationController?.setNavigationBarHidden(chromeHidden || infoShown, animated: animated)
+        navigationController?.setToolbarHidden(chromeHidden, animated: animated)
+        // 보는 동안은 아래 탭 막대를 숨김 (선택 모드와 같은 방법. 닫다가 취소했을 때도 여기서 다시 숨김)
+        if #available(iOS 18.0, *) {
+            tabBarController?.setTabBarHidden(true, animated: animated)
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         // 닫다가 취소했을 때도 다시 끔 (그사이 뒤 화면이 풀었을 수 있음)
         navigationController?.setBackSwipe(blocked: .all, by: self)
+        // 막대가 어긋난 채로 남지 않게 (닫다가 취소한 뒤 등). 맞으면 건드리지 않음
+        if let navigation = navigationController, navigation.topViewController === self,
+           navigation.isToolbarHidden != chromeHidden {
+            navigation.setToolbarHidden(chromeHidden, animated: false)
+        }
+        if #available(iOS 18.0, *), let tabs = tabBarController, !tabs.isTabBarHidden {
+            tabs.setTabBarHidden(true, animated: false)
+        }
         observePaging()
         // 닫다가 취소했을 때 남은 변형을 지움
         if !infoShown { currentPage?.setDismissDrag(.identity) }
@@ -1215,21 +1225,17 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         super.viewWillDisappear(animated)
         // 떠날 때(닫힘·다른 화면을 엶) 다시 켬. 닫기를 취소하면 viewDidAppear 에서 다시 끔
         navigationController?.setBackSwipe(blocked: nil, by: self)
-        guard isMovingFromParent else { return }
-        if isInPhotoTransition {
-            // 격자로 닫힘(우리 사진 전환): 아래 막대는 전환이 서서히 투명하게 한 뒤 숨김.
-            // 위 막대를 숨긴 채였으면 투명하게 꺼내 놓고 전환이 서서히 보이게 함 (격자가 막대를 밀어 내리지 않게)
-            if let navigation = navigationController, navigation.isNavigationBarHidden {
-                navigation.navigationBar.alpha = 0
-                navigation.setNavigationBarHidden(false, animated: false)
-                navigationBarFadesIn = true
-            }
-            return
+        // 떠날 때는 언제나 아래 탭 막대를 다시 보임 (닫힘·이 위에 앨범을 엶·코드로 탭을 바꿈 — showInLibrary).
+        // 이 위에 다른 화면을 열었다 돌아오거나 닫기를 취소하면 viewWillAppear 가 다시 숨김
+        if #available(iOS 18.0, *) {
+            tabBarController?.setTabBarHidden(false, animated: animated)
         }
+        guard isMovingFromParent else { return }
         navigationController?.setNavigationBarHidden(false, animated: animated)
         navigationController?.setToolbarHidden(true, animated: animated)
-        if let coordinator = transitionCoordinator {
-            // 닫힐 때: 바탕이 사라지며 뒤의 격자가 보이고 사진만 썸네일로 줄어듦 (끌어서 닫을 때는 손가락을 따라)
+        // 격자로 닫는 우리 사진 전환이면 바탕·줄·배지는 전환이 서서히 지움
+        if let coordinator = transitionCoordinator, !closesWithPhotoTransition(coordinator) {
+            // 닫힐 때: 바탕이 사라지며 뒤의 화면이 보임
             coordinator.animate(alongsideTransition: { _ in
                 self.backdrop.alpha = 0
                 self.setChromeViewsAlpha(0)
@@ -1240,6 +1246,13 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
                 }
             })
         }
+    }
+
+    /// 이 닫힘을 우리 사진 전환(PhotoTransitionAnimator)이 맡는지 (격자로 돌아가는 움직이는 pop)
+    private func closesWithPhotoTransition(_ coordinator: UIViewControllerTransitionCoordinator) -> Bool {
+        guard coordinator.isAnimated, navigationController?.delegate is PhotoNavigationDelegate,
+              let to = coordinator.viewController(forKey: .to) else { return false }
+        return PhotoTransition.handles(.pop, from: self, to: to)
     }
 
     override func viewSafeAreaInsetsDidChange() {
@@ -1316,7 +1329,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         currentPage?.setMediaHidden(hidden)
     }
 
-    /// 0: 바탕·썸네일 줄·배지가 다 투명 (뒤의 격자가 보임) ~ 1: 평소대로. 위·아래 막대는 전환이 따로 맞춤
+    /// 0: 바탕·썸네일 줄·배지가 다 투명 (뒤의 격자가 보임) ~ 1: 평소대로. 위·아래 막대는 viewWillAppear·viewWillDisappear 의 시스템 호출이 맡음
     func setTransitionAppearance(_ progress: CGFloat) {
         guard isViewLoaded else { return }
         backdrop.alpha = progress

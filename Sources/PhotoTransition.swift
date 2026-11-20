@@ -2,7 +2,8 @@ import UIKit
 
 /// 격자 ↔ 사진 보기 화면 사이의 우리 전환 (순정 사진 앱처럼).
 /// 움직이는 건 사진 하나뿐: 격자의 정사각형 썸네일 자리에서 화면에 맞춘 자리로 커지며 잘린 정사각형이 사진 전체로 펴짐.
-/// 뒤의 격자는 제자리에 그대로 있고, 보기 화면의 흰 바탕·썸네일 줄·막대만 제자리에서 서서히 나타나고 사라짐.
+/// 뒤의 격자는 제자리에 그대로 있고, 보기 화면의 흰 바탕·썸네일 줄·배지만 제자리에서 서서히 나타나고 사라짐.
+/// 위·아래 막대와 탭 막대는 건드리지 않음 (두 화면이 평소의 시스템 호출로 숨기고 보임)
 /// (시스템 확대 전환은 보기 화면 전체를 둥근 카드처럼 키우고 줄여서 이 화면에는 쓰지 않음)
 enum PhotoTransition {
     static let duration: TimeInterval = 0.3
@@ -17,38 +18,6 @@ enum PhotoTransition {
         default:
             return false
         }
-    }
-}
-
-extension UIViewController {
-    /// 지금 진행 중인 화면 전환이 우리 사진 전환인지. 이때 위·아래 막대는 미끄러지지 않고 전환이 투명도로 바꿈
-    var isInPhotoTransition: Bool {
-        guard let coordinator = transitionCoordinator, coordinator.isAnimated,
-              navigationController?.delegate is PhotoNavigationDelegate,
-              let from = coordinator.viewController(forKey: .from),
-              let to = coordinator.viewController(forKey: .to) else { return false }
-        if from is GridViewController && to is ViewerViewController { return true }
-        return from is ViewerViewController && to is GridViewController
-    }
-}
-
-/// 아래 탭 막대의 그림. 보기 화면이 열리고 닫히는 동안 진짜 탭 막대 대신 그 자리에 놓고 서서히 사라지고 나타나게 함.
-/// (탭 막대를 숨기고 보이는 시스템 동작이 사용자 전환 안에서 어떻게 움직일지 믿을 수 없어서 그림으로 대신함)
-struct TabBarSnapshot {
-    let image: UIImage
-    /// 창 좌표
-    let frame: CGRect
-    let windowSize: CGSize
-
-    init?(_ tabs: UITabBarController?) {
-        guard let bar = tabs?.tabBar, let window = bar.window, !bar.isHidden, bar.alpha > 0.01,
-              bar.bounds.width > 0, bar.bounds.height > 0 else { return nil }
-        let renderer = UIGraphicsImageRenderer(bounds: bar.bounds)
-        image = renderer.image { _ in
-            _ = bar.drawHierarchy(in: bar.bounds, afterScreenUpdates: false)
-        }
-        frame = bar.convert(bar.bounds, to: nil)
-        windowSize = window.bounds.size
     }
 }
 
@@ -72,10 +41,6 @@ final class PhotoNavigationDelegate: NSObject, UINavigationControllerDelegate {
         if operation == .pop, let pending = pendingInteractive {
             pendingInteractive = nil
             return pending
-        }
-        if operation == .push, let viewer = toVC as? ViewerViewController {
-            // 탭 막대가 아직 그대로 보일 때 그림을 떠 둠 (닫을 때도 이 그림을 씀)
-            viewer.tabBarSnapshot = TabBarSnapshot(navigationController.tabBarController)
         }
         return PhotoTransitionAnimator(operation: operation, interactive: false)
     }
@@ -117,17 +82,14 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
     private var context: UIViewControllerContextTransitioning?
     private weak var grid: GridViewController?
     private weak var viewer: ViewerViewController?
-    private weak var navigation: UINavigationController?
 
     /// 날아가는 사진: 바깥 판이 자리(썸네일 ↔ 화면에 맞춘 자리)를, 안의 그림이 잘림(정사각형 채움 ↔ 전체)을 맡음
     private var flight: UIView?
     private var flightImage: UIImageView?
     private weak var sourceView: UIView?
-    private var tabBarImage: UIImageView?
     private var mediaSize: CGSize = .zero
     private var fittedRect: CGRect = .zero
     private var thumbRect: CGRect?
-    private var fadesNavigationBar = false
 
     // 끌어서 닫기
     private var started = false
@@ -199,7 +161,7 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         }
     }
 
-    /// 끈 거리(보기 화면 좌표의 이동량). 사진은 손가락을 따라 움직이며 줄고, 바탕·막대는 거리만큼 사라짐
+    /// 끈 거리(보기 화면 좌표의 이동량). 사진은 손가락을 따라 움직이며 줄고, 바탕·썸네일 줄은 거리만큼 사라짐
     func update(translation move: CGPoint) {
         translation = move
         guard started, !ending, let context else { return }
@@ -262,7 +224,6 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
               let viewer = (opening ? toVC : fromVC) as? ViewerViewController else { return false }
         self.grid = grid
         self.viewer = viewer
-        navigation = viewer.navigationController ?? grid.navigationController
         let container = context.containerView
 
         // 화면은 크기를 바꾸지 않고 제자리에 겹쳐 놓기만 함 (보기 화면이 위)
@@ -307,38 +268,14 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
             sourceView?.isHidden = true
             viewer.setTransitionMediaHidden(true)
         }
-
-        // 탭 막대: 그림을 그 자리에 놓고 진짜는 전환 동안 투명하게
-        if let snapshot = viewer.tabBarSnapshot, let window = container.window, window.bounds.size == snapshot.windowSize {
-            let imageView = UIImageView(image: snapshot.image)
-            imageView.frame = container.convert(snapshot.frame, from: nil)
-            imageView.isUserInteractionEnabled = false
-            container.addSubview(imageView)
-            tabBarImage = imageView
-            navigation?.tabBarController?.tabBar.alpha = 0
-        }
         return true
     }
 
-    /// progress 1: 보기 화면이 다 보임, 0: 격자만
+    /// progress 1: 보기 화면이 다 보임, 0: 격자만. 보기 화면 자신의 view 만 바꿈 (막대는 건드리지 않음)
     private func apply(progress: CGFloat) {
         guard let viewer else { return }
         viewer.setTransitionAppearance(progress)
         if flight == nil { viewer.view.alpha = progress }
-        if let navigation {
-            // 숨어 있어도 같이 맞춤 (열 때 보기 화면이 막대를 꺼내는 순간이 이 전후 어느 쪽이든 투명한 채로 나오게)
-            navigation.toolbar.alpha = progress
-            // 보기 화면이 숨겨 둔 위 막대를 투명하게 꺼내 놓았으면 서서히 보이게 (그 표시는 닫힐 때 보기 화면이 붙임)
-            if !opening && viewer.navigationBarFadesIn {
-                fadesNavigationBar = true
-                navigation.navigationBar.alpha = 1 - progress
-            }
-            if tabBarImage == nil, !opening {
-                // 그림이 없으면 진짜 탭 막대를 (보이는 자리에 있으면) 서서히
-                navigation.tabBarController?.tabBar.alpha = 1 - progress
-            }
-        }
-        tabBarImage?.alpha = 1 - progress
     }
 
     /// 날아가는 사진을 rect 에. cropped 면 정사각형 썸네일처럼 가운데를 꽉 채워 자르고, 아니면 사진 전체
@@ -354,24 +291,12 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         flight?.removeFromSuperview()
         flight = nil
         flightImage = nil
-        tabBarImage?.removeFromSuperview()
-        tabBarImage = nil
         sourceView?.isHidden = false
         let viewerShown = opening == completed
-        if viewer?.navigationBarFadesIn == true { fadesNavigationBar = true }
         if let viewer {
             viewer.setTransitionMediaHidden(false, placeholder: viewerShown ? flownImage : nil)
             viewer.view.alpha = 1
             viewer.setTransitionAppearance(viewerShown ? 1 : 0)
-            viewer.navigationBarFadesIn = false
-        }
-        if let navigation {
-            if completed && !opening {
-                // 닫힘: 보기 화면의 아래 막대를 이제 숨김 (전환 동안은 투명해지기만 함)
-                navigation.setToolbarHidden(true, animated: false)
-            }
-            navigation.toolbar.alpha = 1
-            if fadesNavigationBar { navigation.navigationBar.alpha = 1 }
         }
         if !completed && !opening {
             // 닫기를 취소함: 밑에 깔았던 격자를 치움
@@ -380,7 +305,5 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         let context = self.context
         self.context = nil
         context?.completeTransition(completed)
-        // 진짜 탭 막대는 시스템이 전환을 마무리하며 숨기거나 보인 뒤에 되살림 (열린 뒤 한 순간 보이지 않게)
-        navigation?.tabBarController?.tabBar.alpha = 1
     }
 }
