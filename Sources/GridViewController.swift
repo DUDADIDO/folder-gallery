@@ -1376,7 +1376,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 임시 목록(켤 때 먼저 보여 주는 자동 분류·미분류)은 사진 목록이 없거나 표지 한 장뿐이라 전체 목록이 올 때까지 비워 둠
         let provisional = snapshot.isProvisional(folder.id)
         // 앨범 안은 순정처럼 오래된 항목 순이 기본 (같은 저장소를 뒤집어 봄)
-        let new = provisional ? AssetList.empty : Library.shared.list(for: listID, newestFirst: newestFirst)
+        let new = provisional ? AssetList.empty : arranged(Library.shared.list(for: listID, newestFirst: newestFirst))
         if !force && new.version == list.version {
             list = new   // 들어 있는 사진·순서는 같고, 즐겨찾기·편집 상태가 바뀐 새 값으로
             refreshHero()   // 이름·표지가 바뀌었을 수 있음
@@ -1421,7 +1421,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 사진 앱에서 만든 내 앨범이고, 고른 것만 보는 중이 아닐 때
     private var showsAddTile: Bool {
-        !isRoot && folder.albumID != nil && listBeforeShowingSelected == nil
+        // 순정처럼 선택 중에는 숨김
+        !isRoot && folder.albumID != nil && listBeforeShowingSelected == nil && !selecting
     }
 
     /// 배치에 넘기는 칸 수 (마지막 묶음에 '+' 칸 하나 더)
@@ -1447,16 +1448,47 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 최신순인지. 순정 iOS 27 처럼 보관함·미분류·앨범 모두 오래된 순(최신이 맨 아래)이 기본, 정렬 메뉴로 바꿈
     private var newestFirst: Bool {
-        Prefs.newestFirstAlbums.contains(folder.id)
+        sortMode == .newest
+    }
+
+    /// 순정 iOS 27 정렬: 내 앨범은 '사용자 설정 순서'(앨범에 넣은 순서)가 기본, 나머지는 오래된 항목 순
+    private var sortMode: GridSort {
+        if let raw = Prefs.gridSorts[folder.id], let mode = GridSort(rawValue: raw),
+           mode != .custom || folder.albumID != nil { return mode }
+        if Prefs.newestFirstAlbums.contains(folder.id) { return .newest }
+        return !isRoot && folder.albumID != nil ? .custom : .oldest
+    }
+
+    /// 사용자 설정 순서·필터를 반영한 목록
+    private func arranged(_ base: AssetList) -> AssetList {
+        var result = base
+        if sortMode == .custom, let id = folder.albumID, let album = Library.shared.album(id: id) {
+            // 사진 앱 앨범의 순서 그대로 (정렬 없이 읽으면 앨범 순서)
+            let fetched = PHAsset.fetchAssets(in: album, options: nil)
+            var array: [PHAsset] = []
+            array.reserveCapacity(fetched.count)
+            fetched.enumerateObjects { asset, _, _ in array.append(asset) }
+            result = AssetList.make(array)
+        }
+        // 보관함의 즐겨찾기·비디오는 listID 로 이미 걸러짐. 나머지 필터는 여기서
+        let needsFilter: Bool
+        switch libraryFilter {
+        case .all: needsFilter = false
+        case .favorites, .videos: needsFilter = folder.id != "all"
+        case .photos, .screenshots, .live: needsFilter = true
+        }
+        guard needsFilter else { return result }
+        let filter = libraryFilter
+        return AssetList.make(result.array().filter { filter.matches($0) })
     }
 
     /// 실제로 읽는 목록 (보관함은 필터에 따라 즐겨찾기·비디오 목록으로)
     private var listID: String {
         guard folder.id == "all" else { return folder.id }
         switch libraryFilter {
-        case .all: return "all"
         case .favorites: return "favorites"
         case .videos: return "videos"
+        default: return "all"
         }
     }
 
@@ -1630,7 +1662,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let snapshot = Library.shared.snapshot
         hero.titleLabel.text = snapshot.nodes[folder.id]?.title ?? folder.title
         hero.countLabel.text = "항목 \(list.count.formatted())개"
-        hero.playButton.isHidden = list.isEmpty
+        hero.playButton.isHidden = list.isEmpty || selecting
         hero.onPlay = { [weak self] in self?.startSlideshow() }
         // 사진 앱 앨범은 그 앨범의 대표 사진, 아니면 가장 최근 사진 (앨범 카드와 같은 사진)
         guard let cover = snapshot.cover(folder.id) ?? list.last else { return }
@@ -1873,6 +1905,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
         }
         selecting = on
+        if !isRoot, folder.albumID != nil {
+            // '+' 칸이 생기거나 사라짐 (고른 사진은 다시 고름)
+            let keep = on ? [] : selectedAssets().map(\.localIdentifier)
+            buildSections()
+            gridLayout.setSections(layoutCounts)
+            collectionView.reloadData()
+            for flat in list.indexes(ofIDs: keep) {
+                if let path = indexPath(forFlat: flat) { collectionView.selectItem(at: path, animated: false, scrollPosition: []) }
+            }
+        }
         collectionView.isEditing = on
         for cell in collectionView.visibleCells {
             (cell as? AssetCell)?.selecting = on
@@ -1964,9 +2006,17 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if selecting {
             let count = selectedPaths.count
             // 순정 iOS 27: 제목은 그대로 두고(보관함은 사진 위 제목), 오른쪽에 [정렬·필터 ⋯] [닫기 X]
-            navigationItem.title = isRoot ? nil : (count == 0 ? "항목 선택" : "\(count)장 선택")
+            // 제목은 비움 (보관함은 사진 위 제목, 앨범은 표지의 이름이 그대로 보임)
+            navigationItem.title = nil
             navigationItem.hidesBackButton = true
-            navigationItem.leftBarButtonItem = nil
+            if isRoot {
+                navigationItem.leftBarButtonItem = nil
+            } else {
+                // 순정 앨범 화면: 왼쪽 위 "전체 선택" / "전체 해제"
+                let allSelected = count == list.count && count > 0
+                navigationItem.leftBarButtonItem = UIBarButtonItem(title: allSelected ? "전체 해제" : "전체 선택", style: .plain,
+                                                                   target: self, action: #selector(toggleAll))
+            }
             let close = UIBarButtonItem(image: UIImage(systemName: "xmark"), style: .plain, target: self, action: #selector(cancelSelecting))
             let more = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeMoreMenu())
             more.isEnabled = count > 0
@@ -2005,8 +2055,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             } else {
                 // 순정 앨범 화면처럼: [정렬 ⋯] [선택]
                 // 순정 iOS 27 앨범 화면: 왼쪽부터 [⋯] [정렬] [선택], 각각 따로 떨어진 원
+                let filterIcon = libraryFilter == .all ? "line.3.horizontal.decrease" : "line.3.horizontal.decrease.circle.fill"
                 var items: [UIBarButtonItem] = [select, UIBarButtonItem.fixedSpace(8),
-                                                UIBarButtonItem(image: UIImage(systemName: "line.3.horizontal.decrease"), menu: makeSortMenu())]
+                                                UIBarButtonItem(image: UIImage(systemName: filterIcon), menu: makeLibraryMenu())]
                 if folder.isUser {
                     items.append(UIBarButtonItem.fixedSpace(8))
                     items.append(UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeAlbumMenu()))
@@ -2015,27 +2066,31 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
         }
         refreshVisibleHeaders()
+        refreshHero()
         updateTitleOverlay()
         setNeedsStatusBarAppearanceUpdate()
     }
 
     /// 보관함·미분류의 정렬·필터 메뉴 (보관함에만 필터)
+    /// 순정 iOS 27 의 정렬·필터 메뉴: "필터:" 모든 항목 · 즐겨찾기 · 미디어 유형 › / 정렬 ›(지금 순서가 부제)
     private func makeLibraryMenu() -> UIMenu {
-        var children: [UIMenuElement] = [UIMenu(options: .displayInline, children: makeSortMenu().children)]
-        if folder.id == "all" {
-            let filters: [(LibraryFilter, String, String)] = [
-                (.all, "모든 항목", "photo.on.rectangle"),
-                (.favorites, "즐겨찾기", "heart"),
-                (.videos, "비디오", "video"),
-            ]
-            let actions = filters.map { filter, title, symbol in
-                UIAction(title: title, image: UIImage(systemName: symbol), state: libraryFilter == filter ? .on : .off) { [weak self] _ in
-                    self?.setLibraryFilter(filter)
-                }
+        func action(_ filter: LibraryFilter, _ title: String, _ symbol: String) -> UIAction {
+            UIAction(title: title, image: UIImage(systemName: symbol), state: libraryFilter == filter ? .on : .off) { [weak self] _ in
+                self?.setLibraryFilter(filter)
             }
-            children.append(UIMenu(title: "필터", options: .displayInline, children: actions))
         }
-        return UIMenu(children: children)
+        let media = UIMenu(title: "미디어 유형", image: UIImage(systemName: "photo.on.rectangle.angled"), children: [
+            action(.photos, "사진", "photo"),
+            action(.videos, "비디오", "video"),
+            action(.live, "Live Photo", "livephoto"),
+            action(.screenshots, "스크린샷", "camera.viewfinder"),
+        ])
+        let filters = UIMenu(title: "필터:", options: .displayInline, children: [
+            action(.all, "모든 항목", "square.grid.3x3"),
+            action(.favorites, "즐겨찾기", "heart"),
+            media,
+        ])
+        return UIMenu(children: [filters, UIMenu(options: .displayInline, children: [makeSortMenu()])])
     }
 
     private func setLibraryFilter(_ filter: LibraryFilter) {
@@ -2050,25 +2105,28 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     // MARK: - 앨범 화면의 위 버튼 (정렬 · ⋯)
 
     private func makeSortMenu() -> UIMenu {
-        let newest = Prefs.newestFirstAlbums.contains(folder.id)
-        let oldestAction = UIAction(title: "오래된 항목 순으로", image: UIImage(systemName: "clock.arrow.circlepath"),
-                                    state: newest ? .off : .on) { [weak self] _ in
-            self?.setNewestFirst(false)
+        let mode = sortMode
+        var actions = [
+            UIAction(title: "오래된 항목 순으로", image: UIImage(systemName: "clock.arrow.circlepath"),
+                     state: mode == .oldest ? .on : .off) { [weak self] _ in self?.setSort(.oldest) },
+            UIAction(title: "최신 항목 순", image: UIImage(systemName: "clock"),
+                     state: mode == .newest ? .on : .off) { [weak self] _ in self?.setSort(.newest) },
+        ]
+        if !isRoot, folder.albumID != nil {
+            actions.append(UIAction(title: "사용자 설정 순서", image: UIImage(systemName: "person"),
+                                    state: mode == .custom ? .on : .off) { [weak self] _ in self?.setSort(.custom) })
         }
-        let newestAction = UIAction(title: "최신 항목 순으로", image: UIImage(systemName: "clock"),
-                                    state: newest ? .on : .off) { [weak self] _ in
-            self?.setNewestFirst(true)
-        }
-        return UIMenu(title: "정렬", children: [oldestAction, newestAction])
+        let menu = UIMenu(title: "정렬", image: nil, children: actions)
+        menu.subtitle = mode == .custom ? "사용자 설정 순서" : (mode == .newest ? "최신 항목 순" : "오래된 항목 순")
+        return menu
     }
 
-    private func setNewestFirst(_ on: Bool) {
+    private func setSort(_ mode: GridSort) {
+        var sorts = Prefs.gridSorts
+        sorts[folder.id] = mode.rawValue
+        Prefs.gridSorts = sorts
         var set = Prefs.newestFirstAlbums
-        if on {
-            set.insert(folder.id)
-        } else {
-            set.remove(folder.id)
-        }
+        set.remove(folder.id)
         Prefs.newestFirstAlbums = set
         needsScrollToLatest = isRoot
         reloadFromLibrary(force: true)
@@ -2224,7 +2282,23 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 // MARK: - 보관함 필터
 
 enum LibraryFilter {
-    case all, favorites, videos
+    case all, favorites, videos, photos, screenshots, live
+
+    func matches(_ asset: PHAsset) -> Bool {
+        switch self {
+        case .all: return true
+        case .favorites: return asset.isFavorite
+        case .videos: return asset.mediaType == .video
+        case .photos: return asset.mediaType == .image
+        case .screenshots: return asset.mediaSubtypes.contains(.photoScreenshot)
+        case .live: return asset.mediaSubtypes.contains(.photoLive)
+        }
+    }
+}
+
+/// 격자 정렬 (순정 iOS 27: 오래된 항목 순 · 최신 항목 순 · 사용자 설정 순서(내 앨범만))
+enum GridSort: String {
+    case oldest, newest, custom
 }
 
 // MARK: - 보관함 위 제목 (순정 iOS 27: 사진 위 어두운 그라데이션 + 흰 큰 제목 + 날짜·개수)

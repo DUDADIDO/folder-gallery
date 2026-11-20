@@ -93,6 +93,12 @@ enum Prefs {
     }
 
     /// 최신 항목 순으로 보는 앨범 ID (나머지는 순정처럼 오래된 항목 순)
+    /// 화면(폴더 ID)마다 정렬 (GridSort 의 rawValue)
+    static var gridSorts: [String: String] {
+        get { defaults.dictionary(forKey: "gridSorts") as? [String: String] ?? [:] }
+        set { defaults.set(newValue, forKey: "gridSorts") }
+    }
+
     static var newestFirstAlbums: Set<String> {
         get { Set(defaults.stringArray(forKey: "newestFirstAlbums") ?? []) }
         set { defaults.set(Array(newValue), forKey: "newestFirstAlbums") }
