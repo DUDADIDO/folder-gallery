@@ -2194,9 +2194,30 @@ final class SlideshowViewController: UIViewController {
     private let count: Int
     private var index: Int
     private let assetAt: (Int) -> PHAsset?
+    /// 순정처럼: 사진은 화면에 맞추고, 뒤는 그 사진의 색을 아주 크게 늘린 부드러운 바탕
+    private let backdrop = UIImageView()
     private let imageView = UIImageView()
+    private let videoView = PlayerView()
+    private var player: AVPlayer?
+    private var endObserver: NSObjectProtocol?
     private var timer: Timer?
     private var requestID: PHImageRequestID = PHInvalidImageRequestID
+    private var videoRequestID: PHImageRequestID = PHInvalidImageRequestID
+
+    // 멈췄을 때 보이는 것 (순정: 뒤로 · 날짜 · 가운데 재생 단추)
+    private let chrome = UIView()
+    private let backButton = UIButton(type: .system)
+    private let titleLabel = UILabel()
+    private let playButton = UIButton(type: .system)
+    private var paused = false
+
+    private static let dateText: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
 
     init(count: Int, start: Int, assetAt: @escaping (Int) -> PHAsset?) {
         self.count = count
@@ -2209,24 +2230,81 @@ final class SlideshowViewController: UIViewController {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override var prefersStatusBarHidden: Bool { true }
-    override var prefersHomeIndicatorAutoHidden: Bool { true }
+    override var prefersStatusBarHidden: Bool { !paused }
+    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+    override var prefersHomeIndicatorAutoHidden: Bool { !paused }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        for item in [backdrop, imageView] {
+            item.frame = view.bounds
+            item.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.addSubview(item)
+        }
+        backdrop.contentMode = .scaleToFill
+        backdrop.layer.magnificationFilter = .trilinear
         imageView.contentMode = .scaleAspectFit
-        imageView.frame = view.bounds
-        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        view.addSubview(imageView)
-        view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(close)))
+        videoView.frame = view.bounds
+        videoView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        videoView.playerLayer.videoGravity = .resizeAspect
+        videoView.isHidden = true
+        view.addSubview(videoView)
+
+        // 위·아래 어둡게 (막대 글자가 보이게)
+        chrome.frame = view.bounds
+        chrome.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        chrome.alpha = 0
+        view.addSubview(chrome)
+        let shade = CAGradientLayer()
+        shade.colors = [UIColor.black.withAlphaComponent(0.45).cgColor, UIColor.clear.cgColor]
+        shade.frame = CGRect(x: 0, y: 0, width: 2000, height: 160)
+        chrome.layer.addSublayer(shade)
+
+        var back = UIButton.Configuration.plain()
+        if #available(iOS 26.0, *) { back = .glass() }
+        back.image = UIImage(systemName: "chevron.left", withConfiguration: UIImage.SymbolConfiguration(pointSize: 19, weight: .semibold))
+        back.cornerStyle = .capsule
+        backButton.configuration = back
+        backButton.tintColor = .white
+        backButton.addAction(UIAction { [weak self] _ in self?.close() }, for: .primaryActionTriggered)
+        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
+        titleLabel.textColor = .white
+        titleLabel.textAlignment = .center
+        var play = UIButton.Configuration.plain()
+        if #available(iOS 26.0, *) { play = .glass() }
+        play.image = UIImage(systemName: "play.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 30, weight: .bold))
+        play.cornerStyle = .capsule
+        playButton.configuration = play
+        playButton.tintColor = .label
+        playButton.addAction(UIAction { [weak self] _ in self?.setPaused(false) }, for: .primaryActionTriggered)
+        for item in [backButton, titleLabel, playButton] as [UIView] {
+            item.translatesAutoresizingMaskIntoConstraints = false
+            chrome.addSubview(item)
+        }
+        let guide = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            backButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
+            backButton.topAnchor.constraint(equalTo: guide.topAnchor, constant: 0),
+            backButton.widthAnchor.constraint(equalToConstant: 44),
+            backButton.heightAnchor.constraint(equalToConstant: 44),
+            titleLabel.centerXAnchor.constraint(equalTo: chrome.centerXAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            playButton.centerXAnchor.constraint(equalTo: chrome.centerXAnchor),
+            playButton.centerYAnchor.constraint(equalTo: chrome.centerYAnchor),
+            playButton.widthAnchor.constraint(equalToConstant: 64),
+            playButton.heightAnchor.constraint(equalToConstant: 64),
+        ])
+
+        // 순정: 누르면 멈추고 단추가 보임. 다시 누르면 이어서
+        view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
         show(index, animated: false)
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         UIApplication.shared.isIdleTimerDisabled = true
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.advance() }
+        scheduleNext()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -2234,6 +2312,37 @@ final class SlideshowViewController: UIViewController {
         UIApplication.shared.isIdleTimerDisabled = false
         timer?.invalidate()
         timer = nil
+        stopVideo()
+    }
+
+    @objc private func tapped() {
+        setPaused(!paused)
+    }
+
+    private func setPaused(_ on: Bool) {
+        paused = on
+        UIView.animate(withDuration: 0.25) {
+            self.chrome.alpha = on ? 1 : 0
+            self.setNeedsStatusBarAppearanceUpdate()
+        }
+        setNeedsUpdateOfHomeIndicatorAutoHidden()
+        if on {
+            timer?.invalidate()
+            timer = nil
+            player?.pause()
+        } else if let player {
+            player.play()
+        } else {
+            advance()
+        }
+    }
+
+    /// 사진은 3초 뒤 다음으로. 비디오는 끝까지 재생한 뒤 다음으로
+    private func scheduleNext() {
+        timer?.invalidate()
+        timer = nil
+        guard !paused, player == nil, view.window != nil else { return }
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in self?.advance() }
     }
 
     private func advance() {
@@ -2242,8 +2351,20 @@ final class SlideshowViewController: UIViewController {
         show(index, animated: true)
     }
 
+    private func stopVideo() {
+        PHImageManager.default().cancelImageRequest(videoRequestID)
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        endObserver = nil
+        player?.pause()
+        player = nil
+        videoView.playerLayer.player = nil
+        videoView.isHidden = true
+    }
+
     private func show(_ index: Int, animated: Bool) {
         guard let asset = assetAt(index) else { return }
+        stopVideo()
+        titleLabel.text = asset.creationDate.map { Self.dateText.string(from: $0) }
         PHImageManager.default().cancelImageRequest(requestID)
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
@@ -2253,17 +2374,43 @@ final class SlideshowViewController: UIViewController {
         requestID = PHImageManager.default().requestImage(for: asset, targetSize: size, contentMode: .aspectFit,
                                                           options: options) { [weak self] image, _ in
             guard let self, let image else { return }
-            if animated {
-                UIView.transition(with: self.imageView, duration: 0.8, options: .transitionCrossDissolve) {
-                    self.imageView.image = image
-                }
-            } else {
+            // 아주 작게 줄였다가 크게 늘리면 사진 색이 번진 바탕이 됨
+            let tint = image.preparingThumbnail(of: CGSize(width: 3, height: 4))
+            let apply = {
                 self.imageView.image = image
+                self.backdrop.image = tint
+            }
+            if animated {
+                UIView.transition(with: self.view, duration: 0.8, options: [.transitionCrossDissolve, .allowUserInteraction],
+                                  animations: apply)
+            } else {
+                apply()
+            }
+            if asset.mediaType != .video { self.scheduleNext() }
+        }
+        if asset.mediaType == .video {
+            let videoOptions = PHVideoRequestOptions()
+            videoOptions.isNetworkAccessAllowed = true
+            videoRequestID = PHImageManager.default().requestPlayerItem(forVideo: asset, options: videoOptions) { [weak self] item, _ in
+                DispatchQueue.main.async {
+                    guard let self, let item, self.index == index else { return }
+                    let player = AVPlayer(playerItem: item)
+                    player.isMuted = true
+                    self.player = player
+                    self.videoView.playerLayer.player = player
+                    self.videoView.isHidden = false
+                    self.endObserver = NotificationCenter.default.addObserver(
+                        forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                        self?.stopVideo()
+                        self?.advance()
+                    }
+                    if !self.paused { player.play() }
+                }
             }
         }
     }
 
-    @objc private func close() {
+    private func close() {
         let presenter = presentingViewController
         dismiss(animated: true) {
             // 검은 화면의 흰 상태 막대가 남지 않게 뒤 화면 기준으로 다시 맞춤
