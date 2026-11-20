@@ -261,27 +261,44 @@ enum Sharer {
         guard !assets.isEmpty else { return }
         let total = assets.count
         let cancelled = Flag()
+        let finished = Flag()
+        // 순정처럼 바로 공유 시트를 띄움. 꺼내는 게 0.5초 넘게 걸릴 때만 '공유 준비 중' 을 보여 줌 (큰 비디오·여러 장)
         let progress = UIAlertController(title: "공유 준비 중", message: "0 / \(total)", preferredStyle: .alert)
         progress.addAction(UIAlertAction(title: "취소", style: .cancel) { _ in cancelled.on = true })
-        // 알림창이 다 뜬 뒤에 시작 (뜨는 도중에 닫으면 닫기가 무시될 수 있음)
-        host.present(progress, animated: true) {
-            DispatchQueue.global(qos: .userInitiated).async {
-                let root = FileManager.default.temporaryDirectory.appendingPathComponent("share", isDirectory: true)
-                try? FileManager.default.removeItem(at: root)
-                var urls: [URL] = []
-                for (index, asset) in assets.enumerated() {
-                    if cancelled.on { break }
-                    let dir = root.appendingPathComponent(String(index), isDirectory: true)
-                    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                    if let url = export(asset, to: dir) { urls.append(url) }
-                    DispatchQueue.main.async { progress.message = "\(index + 1) / \(total)" }
-                }
-                let result = urls
-                DispatchQueue.main.async {
-                    if cancelled.on { return }
-                    progress.dismiss(animated: true) {
-                        present(result, assets: assets, from: host, barButtonItem: barButtonItem, addToAlbum: addToAlbum)
+        var progressShown = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            guard !finished.on, !cancelled.on, host.presentedViewController == nil else { return }
+            progressShown = true
+            host.present(progress, animated: true)
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("share", isDirectory: true)
+            try? FileManager.default.removeItem(at: root)
+            var urls: [URL] = []
+            for (index, asset) in assets.enumerated() {
+                if cancelled.on { break }
+                let dir = root.appendingPathComponent(String(index), isDirectory: true)
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                if let url = export(asset, to: dir) { urls.append(url) }
+                DispatchQueue.main.async { progress.message = "\(index + 1) / \(total)" }
+            }
+            let result = urls
+            DispatchQueue.main.async {
+                finished.on = true
+                if cancelled.on { return }
+                let show = { present(result, assets: assets, from: host, barButtonItem: barButtonItem, addToAlbum: addToAlbum) }
+                if progressShown {
+                    // 알림창이 다 뜬 뒤에 닫아야 닫기가 무시되지 않음
+                    func dismissWhenReady() {
+                        if progress.presentingViewController != nil, progress.transitionCoordinator == nil {
+                            progress.dismiss(animated: true, completion: show)
+                        } else {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: dismissWhenReady)
+                        }
                     }
+                    dismissWhenReady()
+                } else {
+                    show()
                 }
             }
         }
