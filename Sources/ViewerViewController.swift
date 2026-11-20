@@ -43,6 +43,8 @@ final class PlayerView: UIView {
 final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
     private(set) var asset: PHAsset
     var onSingleTap: (() -> Void)?
+    /// 확대가 시작될 때 (순정: 확대하면 막대가 숨고 바탕이 검게)
+    var onZoomIn: (() -> Void)?
     /// 정보 카드 안의 버튼·줄을 눌렀을 때
     var onInfoAction: ((InfoAction) -> Void)?
     /// 정보를 연 채 맨 위에서 아래로 당겼을 때 (정보 닫기)
@@ -532,6 +534,11 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
         scrollView === zoomScroll ? mediaView : nil
     }
 
+    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+        guard scrollView === zoomScroll else { return }
+        onZoomIn?()
+    }
+
     /// 정보를 연 채 맨 위에서 아래로 당기면 정보를 닫음
     func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint,
                                    targetContentOffset: UnsafeMutablePointer<CGPoint>) {
@@ -551,10 +558,21 @@ final class AssetPageViewController: UIViewController, UIScrollViewDelegate {
             zoomScroll.setZoomScale(1, animated: true)
         } else {
             let point = gesture.location(in: mediaView)
-            let targetScale: CGFloat = 2.5
+            // 순정: 화면을 꽉 채우는 배율로 (이미 거의 꽉 차면 2배)
+            let bounds = zoomScroll.bounds
+            let fit = Geo.fit(mediaSize, in: bounds)
+            let fillScale = fit.width > 0 && fit.height > 0 ? max(bounds.width / fit.width, bounds.height / fit.height) : 2
+            let targetScale = min(zoomScroll.maximumZoomScale, fillScale < 1.3 ? 2 : fillScale)
+            onZoomIn?()
             let width = zoomScroll.bounds.width / targetScale
             let height = zoomScroll.bounds.height / targetScale
-            zoomScroll.zoom(to: CGRect(x: point.x - width / 2, y: point.y - height / 2, width: width, height: height), animated: true)
+            // 사진 밖(검은 여백)이 안 보이게 사진 안으로 붙임
+            func clamp(_ value: CGFloat, _ size: CGFloat, _ low: CGFloat, _ high: CGFloat) -> CGFloat {
+                high - low <= size ? (low + high - size) / 2 : min(max(value, low), high - size)
+            }
+            let x = clamp(point.x - width / 2, width, fit.minX, fit.maxX)
+            let y = clamp(point.y - height / 2, height, fit.minY, fit.maxY)
+            zoomScroll.zoom(to: CGRect(x: x, y: y, width: width, height: height), animated: true)
         }
     }
 
@@ -1437,6 +1455,10 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         let asset = self.asset(at: index)
         let page = AssetPageViewController(asset: asset, liveEnabled: !Prefs.liveOffAssets.contains(asset.localIdentifier))
         page.onSingleTap = { [weak self] in self?.tapped() }
+        page.onZoomIn = { [weak self] in
+            guard let self, !self.infoShown else { return }
+            self.setChromeHidden(true, animated: true)
+        }
         page.onInfoPullDown = { [weak self] in self?.setInfo(false, animated: true) }
         page.onInfoAction = { [weak self, weak page] action in
             guard let self, let page else { return }

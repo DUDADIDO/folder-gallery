@@ -79,10 +79,10 @@ final class AssetCell: UICollectionViewCell {
             heart.leadingAnchor.constraint(equalTo: thumbView.leadingAnchor, constant: 5),
             heart.bottomAnchor.constraint(equalTo: thumbView.bottomAnchor, constant: -5),
             // 순정처럼 오른쪽 아래
-            badge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
-            badge.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -6),
-            badge.widthAnchor.constraint(equalToConstant: 26),
-            badge.heightAnchor.constraint(equalToConstant: 26),
+            badge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            badge.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -4),
+            badge.widthAnchor.constraint(equalToConstant: 22),
+            badge.heightAnchor.constraint(equalToConstant: 22),
         ])
     }
 
@@ -137,10 +137,10 @@ final class AssetCell: UICollectionViewCell {
         badge.isHidden = !on
         guard on else { return }
         let config = UIImage.SymbolConfiguration(paletteColors: [.white, .systemBlue])
-            .applying(UIImage.SymbolConfiguration(pointSize: 22, weight: .regular))
+            .applying(UIImage.SymbolConfiguration(pointSize: 19, weight: .regular))
         badge.image = UIImage(systemName: "checkmark.circle.fill", withConfiguration: config)
         badge.backgroundColor = .white
-        badge.layer.cornerRadius = 13
+        badge.layer.cornerRadius = 11
         badge.contentMode = .center
     }
 }
@@ -647,6 +647,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private let levels: [Int]
     private var columns = 5
     private var pinchRecognizer: UIPinchGestureRecognizer?
+    private var dragSelectRecognizer: UIPanGestureRecognizer?
+    /// 끌어 고르기: 시작 차례, 고르는지(아니면 빼는지), 시작 전 고른 것, 지금 칠한 범위
+    private var dragSelect: (start: Int, selecting: Bool, before: Set<Int>, range: ClosedRange<Int>)?
+    private var dragScrollLink: CADisplayLink?
+    private var dragScrollSpeed: CGFloat = 0
 
     /// 두 손가락으로 칸 수를 바꾸는 중의 상태
     private struct PinchState {
@@ -807,6 +812,14 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         collectionView.addGestureRecognizer(pinch)
         pinchRecognizer = pinch
 
+        // 고르는 중 옆으로 끌면 여러 장 고르기 (순정: 지나간 차례 전체, 위아래 끝에서 저절로 스크롤)
+        let drag = UIPanGestureRecognizer(target: self, action: #selector(dragSelected(_:)))
+        drag.maximumNumberOfTouches = 1
+        drag.delegate = self
+        collectionView.addGestureRecognizer(drag)
+        collectionView.panGestureRecognizer.require(toFail: drag)
+        dragSelectRecognizer = drag
+
         // 아래 막대 버튼(공유·⋯·휴지통)은 선택하는 동안에만 붙임 (setSelecting).
         // 평소에도 붙어 있으면 보기 화면을 닫을 때 보기 화면의 아래 막대가 이 버튼들로 바뀌며 사라짐
 
@@ -960,14 +973,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     private func updateModeBar() {
         guard folder.id == "all", isViewLoaded else { return }
-        let show = modeBarVisible
+        // 고르는 중에는 둘 다 숨기고 선택 막대만 (순정)
+        let show = modeBarVisible && !selecting
         if modeBar.isHidden == show {
             modeBar.isHidden = !show
         }
         // 탭 막대는 늘 막대와 반대로 (다른 곳에서 탭 막대를 다시 보이게 해도 맞춤)
+        let hideTabs = show || selecting
         if #available(iOS 18.0, *), let tabs = tabBarController,
-           navigationController?.topViewController === self, tabs.isTabBarHidden != show {
-            tabs.setTabBarHidden(show, animated: true)
+           navigationController?.topViewController === self, tabs.isTabBarHidden != hideTabs {
+            tabs.setTabBarHidden(hideTabs, animated: true)
         }
         if show {
             let height: CGFloat = 56
@@ -1350,6 +1365,15 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === dragSelectRecognizer, let pan = gestureRecognizer as? UIPanGestureRecognizer {
+            // 고르는 중, 옆으로 먼저 움직일 때만 (위아래는 스크롤)
+            guard selecting, !transitioning else { return false }
+            let velocity = pan.velocity(in: collectionView)
+            guard abs(velocity.x) > abs(velocity.y) else { return false }
+            let point = pan.location(in: collectionView)
+            guard let path = collectionView.indexPathForItem(at: point) else { return false }
+            return flatIndex(path) < list.count
+        }
         guard gestureRecognizer === pinchRecognizer else { return true }
         // 선택 중에는 칸 수를 바꾸지 않음 (두 손가락으로 끌어 고르기·길게 누르기와 부딪히지 않게). 화면 전환 중에도
         return !selecting && !transitioning && !sections.isEmpty && collectionView != nil
@@ -1359,6 +1383,75 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         // 스크롤이 먼저 잡혀도 벌리기가 시작될 수 있게. 벌리기가 시작되면 스크롤을 끔 (beginPinch)
         gestureRecognizer === pinchRecognizer && otherGestureRecognizer === collectionView?.panGestureRecognizer
+    }
+
+    @objc private func dragSelected(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            guard let path = collectionView.indexPathForItem(at: gesture.location(in: collectionView)) else { return }
+            let start = flatIndex(path)
+            let before = Set((collectionView.indexPathsForSelectedItems ?? []).map(flatIndex))
+            dragSelect = (start, !before.contains(start), before, start...start)
+            applyDragSelect(to: start)
+        case .changed:
+            updateDragSelect(gesture)
+            // 위아래 끝 가까이면 저절로 스크롤
+            let y = gesture.location(in: view).y
+            let top = view.safeAreaInsets.top + 60
+            let bottom = view.bounds.height - view.safeAreaInsets.bottom - 80
+            dragScrollSpeed = y < top ? -(top - y) * 0.5 : (y > bottom ? (y - bottom) * 0.5 : 0)
+            if dragScrollSpeed != 0, dragScrollLink == nil {
+                let link = CADisplayLink(target: self, selector: #selector(dragAutoScroll))
+                link.add(to: .main, forMode: .common)
+                dragScrollLink = link
+            } else if dragScrollSpeed == 0 {
+                dragScrollLink?.invalidate()
+                dragScrollLink = nil
+            }
+        default:
+            dragScrollLink?.invalidate()
+            dragScrollLink = nil
+            dragSelect = nil
+            updateChrome()
+        }
+    }
+
+    @objc private func dragAutoScroll() {
+        guard let gesture = dragSelectRecognizer, dragSelect != nil else { return }
+        let inset = collectionView.adjustedContentInset
+        let minY = -inset.top
+        let maxY = max(minY, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
+        let y = min(max(minY, collectionView.contentOffset.y + dragScrollSpeed), maxY)
+        collectionView.contentOffset.y = y
+        updateDragSelect(gesture)
+    }
+
+    private func updateDragSelect(_ gesture: UIPanGestureRecognizer) {
+        let point = gesture.location(in: collectionView)
+        guard let path = collectionView.indexPathForItem(at: point) ?? nearestItem(to: point) else { return }
+        let flat = flatIndex(path)
+        guard flat < list.count else { return }
+        applyDragSelect(to: flat)
+    }
+
+    private func applyDragSelect(to flat: Int) {
+        guard var state = dragSelect else { return }
+        let range = min(state.start, flat)...max(state.start, flat)
+        let touched = min(range.lowerBound, state.range.lowerBound)...max(range.upperBound, state.range.upperBound)
+        for index in touched {
+            let want = range.contains(index) ? state.selecting : state.before.contains(index)
+            guard let path = indexPath(forFlat: index) else { continue }
+            let has = collectionView.cellForItem(at: path)?.isSelected
+                ?? (collectionView.indexPathsForSelectedItems?.contains(path) ?? false)
+            if want && !has {
+                collectionView.selectItem(at: path, animated: false, scrollPosition: [])
+            } else if !want && has {
+                collectionView.deselectItem(at: path, animated: false)
+            }
+        }
+        state.range = range
+        dragSelect = state
+        updateChrome()
     }
 
     @objc private func pinched(_ gesture: UIPinchGestureRecognizer) {
@@ -2085,7 +2178,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 옆으로 끌어서 여러 장 선택 (iOS 기본 동작, 화면 끝에서 자동 스크롤)
     func collectionView(_ collectionView: UICollectionView, shouldBeginMultipleSelectionInteractionAt indexPath: IndexPath) -> Bool {
-        selecting   // 길게 누르거나 '선택'으로 들어온 뒤에만. 아니면 두 손가락 벌리기가 선택으로 잡힘
+        false   // 이 배치에서는 시스템 것이 안 잡혀서 직접 만든 끌어 고르기(dragSelected)를 씀. 길게 누르거나 '선택'으로 들어온 뒤에만. 아니면 두 손가락 벌리기가 선택으로 잡힘
     }
 
     func collectionView(_ collectionView: UICollectionView, didBeginMultipleSelectionInteractionAt indexPath: IndexPath) {
@@ -2238,6 +2331,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if #available(iOS 18.0, *) {
             tabBarController?.setTabBarHidden(on, animated: true)
         }
+        updateModeBar()
         // 옆으로 끌어 선택하는 동안 '밀어서 뒤로'가 잡히지 않게 (보기 화면·앨범 화면이 막는 것과는 따로 기억)
         navigationController?.setBackSwipe(blocked: on ? UINavigationController.BackSwipeBlock.all : nil, by: selectionSwipeToken)
         if on {
