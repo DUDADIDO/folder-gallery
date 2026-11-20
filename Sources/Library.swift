@@ -672,6 +672,67 @@ final class Library: NSObject, PHPhotoLibraryChangeObserver {
         change({ PHAssetChangeRequest(for: asset).creationDate = date }, completion: completion)
     }
 
+    /// 가리기 (순정의 "가리기": 가려진 항목으로 옮겨져 보관함에서 안 보임)
+    func setHidden(_ assets: [PHAsset], _ hidden: Bool, completion: ((Bool) -> Void)? = nil) {
+        change({
+            for asset in assets { PHAssetChangeRequest(for: asset).isHidden = hidden }
+        }, completion: completion)
+    }
+
+    /// 복제 (순정의 "복제": 원본 파일을 그대로 새 항목으로. 날짜·위치·즐겨찾기도 같게)
+    func duplicate(_ asset: PHAsset, completion: ((Bool) -> Void)? = nil) {
+        let wanted: [PHAssetResourceType] = [.photo, .video, .pairedVideo, .fullSizePhoto, .fullSizeVideo]
+        var resources = PHAssetResource.assetResources(for: asset).filter { wanted.contains($0.type) }
+        // 편집본이 있으면 편집본으로 (순정도 지금 보이는 모습으로 복제)
+        if resources.contains(where: { $0.type == .fullSizePhoto }) { resources.removeAll { $0.type == .photo } }
+        if resources.contains(where: { $0.type == .fullSizeVideo }) { resources.removeAll { $0.type == .video } }
+        guard !resources.isEmpty else {
+            completion?(false)
+            return
+        }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("dup-" + UUID().uuidString)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        let group = DispatchGroup()
+        var files: [(PHAssetResourceType, URL)] = []
+        var failed = false
+        for resource in resources {
+            let url = folder.appendingPathComponent(resource.originalFilename)
+            group.enter()
+            PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) { error in
+                DispatchQueue.main.async {
+                    if error != nil { failed = true }
+                    // 편집본은 원본 자리로 (새 항목에서는 그게 원본)
+                    let type: PHAssetResourceType = resource.type == .fullSizePhoto ? .photo
+                        : (resource.type == .fullSizeVideo ? .video : resource.type)
+                    files.append((type, url))
+                    group.leave()
+                }
+            }
+        }
+        group.notify(queue: .main) {
+            guard !failed else {
+                try? FileManager.default.removeItem(at: folder)
+                completion?(false)
+                return
+            }
+            // 사진 → 짝 영상 순서가 맞아야 Live Photo 로 들어감
+            let order: [PHAssetResourceType] = [.photo, .video, .pairedVideo]
+            let sorted = files.sorted { (order.firstIndex(of: $0.0) ?? 9) < (order.firstIndex(of: $1.0) ?? 9) }
+            self.change({
+                let request = PHAssetCreationRequest.forAsset()
+                for (type, url) in sorted { request.addResource(with: type, fileURL: url, options: nil) }
+                request.creationDate = asset.creationDate
+                request.location = asset.location
+                request.isFavorite = asset.isFavorite
+            }, completion: { ok in
+                try? FileManager.default.removeItem(at: folder)
+                completion?(ok)
+            })
+        }
+    }
+
     /// 찍은 자리 바꾸기 (정보의 "위치 추가…")
     func setLocation(_ asset: PHAsset, _ location: CLLocation, completion: ((Bool) -> Void)? = nil) {
         change({ PHAssetChangeRequest(for: asset).location = location }, completion: completion)

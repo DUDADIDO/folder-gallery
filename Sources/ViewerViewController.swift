@@ -3,6 +3,7 @@ import CoreLocation
 import Photos
 import PhotosUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// 그림 자리 계산
 enum Geo {
@@ -2030,11 +2031,83 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         }
     }
 
+    /// 순정 iOS 27 의 ··· 메뉴와 같은 짜임:
+    /// 위 줄(복사 · 복제 · 가리기) / 슬라이드쇼 시작 / 추가 대상 › / 정보 조정 ›
     private func makeMoreMenu() -> UIMenu {
-        UIMenu(children: [
-            UIAction(title: "앨범으로 이동", image: UIImage(systemName: "folder")) { [weak self] _ in self?.sendCurrent(copy: false) },
-            UIAction(title: "앨범에 추가", image: UIImage(systemName: "rectangle.stack.badge.plus")) { [weak self] _ in self?.sendCurrent(copy: true) },
+        let top = UIMenu(options: .displayInline, preferredElementSize: .medium, children: [
+            UIAction(title: "복사", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in self?.copyCurrent() },
+            UIAction(title: "복제", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in self?.duplicateCurrent() },
+            UIAction(title: "가리기", image: UIImage(systemName: "eye.slash")) { [weak self] _ in self?.hideCurrent() },
         ])
+        let slideshow = UIMenu(options: .displayInline, children: [
+            UIAction(title: "슬라이드쇼 시작", image: UIImage(systemName: "play.rectangle")) { [weak self] _ in self?.startSlideshow() },
+        ])
+        let addTo = UIMenu(title: "추가 대상", image: UIImage(systemName: "photo.on.rectangle.angled"), children: [
+            UIAction(title: "앨범에 추가", image: UIImage(systemName: "rectangle.stack.badge.plus")) { [weak self] _ in self?.sendCurrent(copy: true) },
+            UIAction(title: "앨범으로 이동", image: UIImage(systemName: "folder")) { [weak self] _ in self?.sendCurrent(copy: false) },
+        ])
+        let adjust = UIMenu(title: "정보 조정", image: UIImage(systemName: "info.circle"), children: [
+            UIAction(title: "날짜 및 시간 조정", image: UIImage(systemName: "calendar")) { [weak self] _ in
+                guard let self, let page = self.currentPage else { return }
+                self.adjustDate(of: page)
+            },
+            UIAction(title: "위치 조정", image: UIImage(systemName: "location")) { [weak self] _ in
+                guard let self, let page = self.currentPage else { return }
+                self.addLocation(to: page)
+            },
+        ])
+        return UIMenu(children: [top, slideshow, UIMenu(options: .displayInline, children: [addTo, adjust])])
+    }
+
+    /// 복사: 지금 사진(영상)을 붙여 넣을 수 있게 클립보드로
+    private func copyCurrent() {
+        guard let asset = currentAsset else { return }
+        if asset.mediaType == .video {
+            let options = PHVideoRequestOptions()
+            options.isNetworkAccessAllowed = true
+            options.version = .current
+            PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { video, _, _ in
+                guard let url = (video as? AVURLAsset)?.url, let data = try? Data(contentsOf: url) else { return }
+                let type = UTType(filenameExtension: url.pathExtension) ?? .movie
+                DispatchQueue.main.async { UIPasteboard.general.setData(data, forPasteboardType: type.identifier) }
+            }
+            return
+        }
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.version = .current
+        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, uti, _, _ in
+            guard let data else { return }
+            UIPasteboard.general.setData(data, forPasteboardType: uti ?? UTType.jpeg.identifier)
+        }
+    }
+
+    /// 복제: 같은 사진을 새 항목으로 (보관함 알림이 목록에 넣음)
+    private func duplicateCurrent() {
+        guard let asset = currentAsset else { return }
+        Library.shared.duplicate(asset) { [weak self] ok in
+            if !ok { self?.toast("복제하지 못했어요") }
+        }
+    }
+
+    /// 가리기: 가려진 항목으로 (보관함에서 빠지니 옆 사진으로 넘어감)
+    private func hideCurrent() {
+        guard let asset = currentAsset else { return }
+        let id = asset.localIdentifier
+        Library.shared.setHidden([asset], true) { [weak self] ok in
+            if ok { self?.remove(id: id) }
+        }
+    }
+
+    /// 슬라이드쇼: 지금 사진부터 차례로
+    private func startSlideshow() {
+        guard !list.isEmpty else { return }
+        let show = SlideshowViewController(count: list.count, start: currentIndex) { [weak self] index in
+            self?.asset(at: index)
+        }
+        show.modalPresentationStyle = .fullScreen
+        show.modalTransitionStyle = .crossDissolve
+        present(show, animated: true)
     }
 
     @objc private func addToAlbum() {
@@ -2056,5 +2129,85 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         Library.shared.delete([asset]) { [weak self] ok in
             if ok { self?.remove(id: id) }
         }
+    }
+}
+
+// MARK: - 슬라이드쇼 (검은 바탕에 사진이 3초마다 천천히 바뀜. 누르면 끝)
+
+final class SlideshowViewController: UIViewController {
+    private let count: Int
+    private var index: Int
+    private let assetAt: (Int) -> PHAsset?
+    private let imageView = UIImageView()
+    private var timer: Timer?
+    private var requestID: PHImageRequestID = PHInvalidImageRequestID
+
+    init(count: Int, start: Int, assetAt: @escaping (Int) -> PHAsset?) {
+        self.count = count
+        self.index = start
+        self.assetAt = assetAt
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var prefersStatusBarHidden: Bool { true }
+    override var prefersHomeIndicatorAutoHidden: Bool { true }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        imageView.contentMode = .scaleAspectFit
+        imageView.frame = view.bounds
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(imageView)
+        view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(close)))
+        show(index, animated: false)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        UIApplication.shared.isIdleTimerDisabled = true
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.advance() }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        UIApplication.shared.isIdleTimerDisabled = false
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func advance() {
+        guard count > 1 else { return }
+        index = (index + 1) % count
+        show(index, animated: true)
+    }
+
+    private func show(_ index: Int, animated: Bool) {
+        guard let asset = assetAt(index) else { return }
+        PHImageManager.default().cancelImageRequest(requestID)
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .highQualityFormat
+        let scale = view.window?.screen.scale ?? 3
+        let size = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
+        requestID = PHImageManager.default().requestImage(for: asset, targetSize: size, contentMode: .aspectFit,
+                                                          options: options) { [weak self] image, _ in
+            guard let self, let image else { return }
+            if animated {
+                UIView.transition(with: self.imageView, duration: 0.8, options: .transitionCrossDissolve) {
+                    self.imageView.image = image
+                }
+            } else {
+                self.imageView.image = image
+            }
+        }
+    }
+
+    @objc private func close() {
+        dismiss(animated: true)
     }
 }
