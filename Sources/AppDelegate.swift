@@ -18,8 +18,6 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControllerDelegate {
     var window: UIWindow?
-    private weak var hiddenRoot: FoldersViewController?
-    private weak var hiddenNav: UINavigationController?
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
         guard let windowScene = scene as? UIWindowScene else { return }
@@ -41,15 +39,10 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
         unsortedNav.navigationBar.prefersLargeTitles = true
         unsortedNav.tabBarItem = UITabBarItem(title: "미분류", image: UIImage(systemName: "tray"), tag: 3)
 
-        let hidden = FoldersViewController(mode: .hidden)
-        let hiddenNav = TopStyledNavigationController(rootViewController: hidden)
-        hiddenNav.navigationBar.prefersLargeTitles = true
-        hiddenNav.tabBarItem = UITabBarItem(title: "숨긴 앨범", image: UIImage(systemName: "eye.slash"), tag: 2)
-        self.hiddenRoot = hidden
-        self.hiddenNav = hiddenNav
+        // 숨긴 앨범은 탭에 두지 않음 (앨범 탭 ⋯ 메뉴에서 들어감)
 
         // 격자 ↔ 사진 보기 화면만 우리 전환 (사진만 날아가고 둘레는 서서히). 나머지 전환은 지금 그대로
-        for nav in [libraryNav, albumsNav, unsortedNav, hiddenNav] {
+        for nav in [libraryNav, albumsNav, unsortedNav] {
             nav.delegate = PhotoNavigationDelegate.shared
         }
 
@@ -67,14 +60,13 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
                 return nav
             }
             search.automaticallyActivatesSearch = true
-            tabs.tabs = [tab(libraryNav, "library"), tab(albumsNav, "albums"), tab(unsortedNav, "unsorted"),
-                         tab(hiddenNav, "hidden"), search]
+            tabs.tabs = [tab(libraryNav, "library"), tab(albumsNav, "albums"), tab(unsortedNav, "unsorted"), search]
             // iOS 27: 검색 탭을 따로 떨어진 둥근 버튼으로 (순정과 같은 자리)
             if #available(iOS 27.0, *) {
                 tabs.prominentTabIdentifier = search.identifier
             }
         } else {
-            tabs.viewControllers = [libraryNav, albumsNav, unsortedNav, hiddenNav]
+            tabs.viewControllers = [libraryNav, albumsNav, unsortedNav]
         }
         tabs.selectedIndex = 1   // 켜면 앨범 탭부터
         tabs.delegate = self
@@ -99,17 +91,10 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
         guard let folder = Library.shared.snapshot.folders.first(where: { $0.id == id }),
               let tabs = window?.rootViewController as? UITabBarController,
               let albums = tabs.viewControllers?.compactMap({ $0 as? UINavigationController })
-                .first(where: { $0.viewControllers.first is FoldersViewController && $0 !== hiddenNav }) else { return }
+                .first(where: { $0.viewControllers.first is FoldersViewController }) else { return }
         if let index = tabs.viewControllers?.firstIndex(where: { $0 === albums }) { tabs.selectedIndex = index }
         albums.popToRootViewController(animated: false)
         albums.pushViewController(GridViewController(folder: folder), animated: true)
-    }
-
-    /// 숨긴 앨범 탭을 벗어나면 다시 잠금
-    func tabBarController(_ tabBarController: UITabBarController, didSelect viewController: UIViewController) {
-        if viewController !== hiddenNav {
-            hiddenRoot?.lock()
-        }
     }
 }
 

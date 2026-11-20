@@ -594,12 +594,22 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
 
     // MARK: - 숨긴 앨범 잠금
 
-    /// 다른 탭으로 가거나 앱이 뒤로 가면 다시 잠금
+    /// 앱이 뒤로 가면 숨긴 앨범 화면을 닫음 (다시 들어올 때 또 인증)
     @objc func lock() {
         guard mode == .hidden, unlocked else { return }
         unlocked = false
-        navigationController?.popToRootViewController(animated: false)
+        if let nav = navigationController, let index = nav.viewControllers.firstIndex(of: self), index > 0 {
+            nav.popToViewController(nav.viewControllers[index - 1], animated: false)
+        }
         if isViewLoaded { reload(force: true) }
+    }
+
+    /// 숨긴 앨범 화면을 벗어나면 (뒤로·다른 탭) 그 안에서 연 화면까지 닫고 다시 잠금
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        guard mode == .hidden, let nav = navigationController else { return }
+        // 이 화면 위에 앨범을 연 경우가 아니면 (다른 탭으로 감)
+        if nav.topViewController === self || tabBarController?.selectedViewController !== nav { lock() }
     }
 
     private func authenticate() {
@@ -611,6 +621,9 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
             if ok {
                 self.unlocked = true
                 self.reload(force: true)
+            } else if let nav = self.navigationController, let index = nav.viewControllers.firstIndex(of: self), index > 0 {
+                // 취소하면 앨범으로 돌아감 (다시 묻지 않게)
+                nav.popToViewController(nav.viewControllers[index - 1], animated: true)
             }
         }
     }
@@ -1181,6 +1194,11 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
 
         var sections: [UIMenu] = [viewMenu, sortMenu]
         if mode == .top {
+            // 숨긴 앨범은 탭 대신 여기서만 들어감 (Face ID 로 잠김)
+            let hidden = UIAction(title: "숨긴 앨범", image: UIImage(systemName: "eye.slash")) { [weak self] _ in
+                self?.navigationController?.pushViewController(FoldersViewController(mode: .hidden), animated: true)
+            }
+            sections.append(UIMenu(title: "", options: .displayInline, children: [hidden]))
             let hideMoved = UIAction(title: "앨범에 넣은 사진은 자동 분류에서 빼기", state: Library.shared.hideMoved ? .on : .off) { [weak self] _ in
                 Library.shared.hideMoved.toggle()
                 self?.refreshMenu()
