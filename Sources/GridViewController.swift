@@ -706,6 +706,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             collectionView.contentInsetAdjustmentBehavior = .never
         }
         view.addSubview(collectionView)
+        // 맨 아래에 backdrop 이 먼저 깔려 있어 UIKit 이 이 스크롤뷰를 스스로 못 찾음.
+        // 알려 줘야 스크롤할 때 큰 제목이 접히고, 위·아래 막대 밑의 흐림(가장자리 효과)이 생김
+        setContentScrollView(collectionView, for: [.top, .bottom])
 
         emptyLabel.text = "사진이 없어요"
         emptyLabel.textColor = .secondaryLabel
