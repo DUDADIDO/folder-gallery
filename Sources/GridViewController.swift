@@ -346,7 +346,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func holdReloadsDuringTransition() {
         guard let coordinator = transitionCoordinator else { return }
         transitioning = true
-        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+        let queued = coordinator.animate(alongsideTransition: nil) { [weak self] _ in
             guard let self else { return }
             self.transitioning = false
             if self.reloadPending {
@@ -354,6 +354,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 self.reloadFromLibrary(force: false)
             }
         }
+        // 전환에 끼워 넣지 못했으면 끝났다는 알림이 안 오므로 미루지 않음
+        if !queued { transitioning = false }
     }
 
     /// 앨범 화면을 닫는 확대 전환을 시작해도 되는지. 왼쪽 가장자리에서 오른쪽으로 밀기, 또는 맨 위에서 아래로 끌기만.

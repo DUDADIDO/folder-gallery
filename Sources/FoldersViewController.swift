@@ -403,13 +403,18 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
     private func holdReloadsDuringTransition() -> Bool {
         guard let coordinator = transitionCoordinator else { return false }
         transitioning = true
-        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+        let queued = coordinator.animate(alongsideTransition: nil) { [weak self] _ in
             guard let self else { return }
             self.transitioning = false
             if self.reloadPending {
                 self.reloadPending = false
                 self.reload(force: false)
             }
+        }
+        // 전환에 끼워 넣지 못했으면 끝났다는 알림이 안 오므로 미루지 않음 (안 그러면 계속 미뤄진 채로 남음)
+        if !queued {
+            transitioning = false
+            return false
         }
         return true
     }

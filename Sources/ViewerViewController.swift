@@ -1238,10 +1238,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     func allowsInteractiveDismiss(location: CGPoint, velocity: CGPoint) -> Bool {
         if infoShown || infoProgress > 0 { return false }
         if let page = currentPage, page.isZoomed { return false }
-        guard ZoomGesture.isDownward(velocity) else { return false }
-        guard isViewLoaded else { return true }
+        guard isViewLoaded else { return ZoomGesture.isDownward(velocity) }
         // 옆으로 넘기는 중(손가락을 떼고 미끄러지는 중 포함)이면 아님
         if let scroll = pagingScrollView, scroll.isDragging || scroll.isDecelerating { return false }
+        // 속도를 알 수 없을 때(0)는 방향을 못 가리므로, 넘기는 중이 아니면 허용. 그 밖에는 분명히 아래로 끌 때만
+        if velocity != .zero, !ZoomGesture.isDownward(velocity) { return false }
         // 썸네일 줄·영상 막대 위에서 시작한 끌기는 그 막대의 것
         for bar in [scrubber, videoControls] as [UIView] where !bar.isHidden && bar.alpha > 0.01 {
             if bar.frame.insetBy(dx: 0, dy: -8).contains(location) { return false }
