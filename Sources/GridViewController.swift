@@ -755,9 +755,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         emptyLabel.numberOfLines = 0
         emptyLabel.font = .systemFont(ofSize: 16)
 
-        let press = UILongPressGestureRecognizer(target: self, action: #selector(longPressed(_:)))
-        press.minimumPressDuration = 0.35
-        collectionView.addGestureRecognizer(press)
+        // 길게 누르면 순정 iOS 27 처럼 사진 미리보기 + 메뉴 (collectionView(_:contextMenuConfigurationForItemsAt:point:))
 
         // 두 손가락으로 벌리고 오므려 칸 수 바꾸기 (손가락을 따라 칸이 커지고 작아짐)
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
@@ -1642,7 +1640,14 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             collectionView.deselectItem(at: indexPath, animated: false)
             // 칸 수를 바꾸는 중에는 열지 않음
             guard !isPinching else { return }
-            let viewer = ViewerViewController(list: list, index: flatIndex(indexPath), folderID: folder.id,
+            openViewer(flat: flatIndex(indexPath))
+        }
+    }
+
+    private func openViewer(flat: Int) {
+        guard flat >= 0, flat < list.count else { return }
+        do {
+            let viewer = ViewerViewController(list: list, index: flat, folderID: folder.id,
                                               newestFirst: newestFirst, sourceAlbumID: folder.albumID)
             viewer.fallbackBounds = view.bounds
             // 열고 닫는 전환은 내비게이션 delegate(PhotoNavigationDelegate)의 우리 전환:
@@ -1681,14 +1686,114 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         updateChrome()
     }
 
-    @objc private func longPressed(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began, !selecting, !isPinching else { return }
-        let point = gesture.location(in: collectionView)
-        guard let indexPath = collectionView.indexPathForItem(at: point) else { return }
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        setSelecting(true)
-        collectionView.selectItem(at: indexPath, animated: false, scrollPosition: [])
-        updateChrome()
+    // MARK: - 길게 누르기 (순정 iOS 27: 사진 미리보기 + 메뉴)
+
+    func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemsAt indexPaths: [IndexPath],
+                        point: CGPoint) -> UIContextMenuConfiguration? {
+        // 선택 중에는 끌어서 여러 장 고르기가 우선
+        guard !selecting, !isPinching, let path = indexPaths.first, path.section < sections.count,
+              path.item < sections[path.section].range.count else { return nil }
+        let flat = flatIndex(path)
+        let asset = list[flat]
+        return UIContextMenuConfiguration(identifier: flat as NSNumber, previewProvider: {
+            AssetPreviewController(asset: asset)
+        }, actionProvider: { [weak self] _ in
+            self?.makeAssetMenu([asset], single: true)
+        })
+    }
+
+    /// 미리보기를 누르면 그 사진을 엶
+    func collectionView(_ collectionView: UICollectionView, willPerformPreviewActionForMenuWith configuration: UIContextMenuConfiguration,
+                        animator: UIContextMenuInteractionCommitAnimating) {
+        guard let flat = (configuration.identifier as? NSNumber)?.intValue, flat < list.count else { return }
+        animator.preferredCommitStyle = .pop
+        animator.addCompletion { [weak self] in
+            self?.openViewer(flat: flat)
+        }
+    }
+
+    /// 사진 메뉴 (길게 누르기 · 선택 중 ⋯ 공용). single 이면 공유·정보 조정·삭제까지 (순정 길게 누르기 메뉴)
+    private func makeAssetMenu(_ assets: [PHAsset], single: Bool) -> UIMenu {
+        let top = UIMenu(options: .displayInline, preferredElementSize: .medium, children: [
+            UIAction(title: "복사", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in self?.copyAssets(assets) },
+            UIAction(title: "복제", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in self?.duplicateAssets(assets) },
+            UIAction(title: "가리기", image: UIImage(systemName: "eye.slash")) { [weak self] _ in self?.hideAssets(assets) },
+        ])
+        let allFavorite = !assets.isEmpty && assets.allSatisfy(\.isFavorite)
+        var middle: [UIMenuElement] = []
+        if single {
+            middle.append(UIAction(title: "공유", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
+                guard let self else { return }
+                Sharer.share(assets, from: self, barButtonItem: nil)
+            })
+        }
+        middle.append(UIAction(title: allFavorite ? "즐겨찾기 해제" : "즐겨찾기",
+                               image: UIImage(systemName: allFavorite ? "heart.slash" : "heart")) { [weak self] _ in
+            self?.favoriteAssets(assets, !allFavorite)
+        })
+        var addActions: [UIAction] = [
+            UIAction(title: "앨범에 추가", image: UIImage(systemName: "rectangle.stack.badge.plus")) { [weak self] _ in self?.send(assets, copy: true) },
+            UIAction(title: "앨범으로 이동", image: UIImage(systemName: "folder")) { [weak self] _ in self?.send(assets, copy: false) },
+        ]
+        if folder.isUser {
+            addActions.append(UIAction(title: "이 앨범에서 빼기", image: UIImage(systemName: "minus.circle")) { [weak self] _ in
+                self?.removeFromAlbum(assets)
+            })
+        }
+        var lower: [UIMenuElement] = [UIMenu(title: "추가 대상", image: UIImage(systemName: "photo.on.rectangle.angled"), children: addActions)]
+        if single, let asset = assets.first, asset.canPerform(.properties) {
+            lower.append(UIMenu(title: "정보 조정", image: UIImage(systemName: "info.circle"), children: [
+                UIAction(title: "날짜 및 시간 조정", image: UIImage(systemName: "calendar")) { [weak self] _ in self?.adjustDate(asset) },
+                UIAction(title: "위치 조정", image: UIImage(systemName: "location")) { [weak self] _ in self?.adjustLocation(asset) },
+            ]))
+        }
+        var children: [UIMenuElement] = [top, UIMenu(options: .displayInline, children: middle),
+                                          UIMenu(options: .displayInline, children: lower)]
+        if single {
+            children.append(UIMenu(options: .displayInline, children: [
+                UIAction(title: "삭제", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+                    self?.deleteAssets(assets)
+                },
+            ]))
+        } else {
+            let allSelected = assets.count == list.count && !assets.isEmpty
+            children.append(UIMenu(options: .displayInline, children: [
+                UIAction(title: allSelected ? "전체 해제" : "전체 선택",
+                         image: UIImage(systemName: allSelected ? "circle.dashed" : "checkmark.circle")) { [weak self] _ in
+                    self?.toggleAll()
+                },
+            ]))
+        }
+        return UIMenu(children: children)
+    }
+
+    private func adjustDate(_ asset: PHAsset) {
+        let sheet = DateAdjustViewController(date: asset.creationDate ?? Date())
+        sheet.onSave = { [weak self] date in
+            Library.shared.setCreationDate(asset, date) { ok in
+                if !ok { self?.toast("날짜를 바꾸지 못했어요") }
+            }
+        }
+        presentSheet(sheet)
+    }
+
+    private func adjustLocation(_ asset: PHAsset) {
+        let sheet = LocationSearchViewController()
+        sheet.onPick = { [weak self] location in
+            Library.shared.setLocation(asset, location) { ok in
+                if !ok { self?.toast("위치를 넣지 못했어요") }
+            }
+        }
+        presentSheet(sheet)
+    }
+
+    private func presentSheet(_ root: UIViewController) {
+        let nav = UINavigationController(rootViewController: root)
+        if let presentation = nav.sheetPresentationController {
+            presentation.detents = [.large()]
+            presentation.prefersGrabberVisible = true
+        }
+        present(nav, animated: true)
     }
 
     private func setSelecting(_ on: Bool) {
@@ -1935,34 +2040,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 갤럭시의 '더보기': 앨범으로 이동 · 앨범으로 복사
     /// 순정 iOS 27 선택 중 ⋯ 메뉴: 위 줄(복사·복제·가리기) / 즐겨찾기 / 추가 대상 › / 전체 선택
     private func makeMoreMenu() -> UIMenu {
-        let top = UIMenu(options: .displayInline, preferredElementSize: .medium, children: [
-            UIAction(title: "복사", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in self?.copySelected() },
-            UIAction(title: "복제", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in self?.duplicateSelected() },
-            UIAction(title: "가리기", image: UIImage(systemName: "eye.slash")) { [weak self] _ in self?.hideSelected() },
-        ])
-        let assets = selectedAssets()
-        let allFavorite = !assets.isEmpty && assets.allSatisfy(\.isFavorite)
-        let favorite = UIMenu(options: .displayInline, children: [
-            UIAction(title: allFavorite ? "즐겨찾기 해제" : "즐겨찾기", image: UIImage(systemName: allFavorite ? "heart.slash" : "heart")) { [weak self] _ in
-                self?.favoriteSelected(!allFavorite)
-            },
-        ])
-        var addActions: [UIAction] = [
-            UIAction(title: "앨범에 추가", image: UIImage(systemName: "rectangle.stack.badge.plus")) { [weak self] _ in self?.sendSelected(copy: true) },
-            UIAction(title: "앨범으로 이동", image: UIImage(systemName: "folder")) { [weak self] _ in self?.sendSelected(copy: false) },
-        ]
-        if folder.isUser {
-            addActions.append(UIAction(title: "이 앨범에서 빼기", image: UIImage(systemName: "minus.circle")) { [weak self] _ in
-                self?.removeSelectedFromAlbum()
-            })
-        }
-        let addTo = UIMenu(title: "추가 대상", image: UIImage(systemName: "photo.on.rectangle.angled"), children: addActions)
-        let allSelected = assets.count == list.count && !assets.isEmpty
-        let all = UIAction(title: allSelected ? "전체 해제" : "전체 선택",
-                           image: UIImage(systemName: allSelected ? "circle.dashed" : "checkmark.circle")) { [weak self] _ in
-            self?.toggleAll()
-        }
-        return UIMenu(children: [top, favorite, UIMenu(options: .displayInline, children: [addTo, all])])
+        makeAssetMenu(selectedAssets(), single: false)
     }
 
     @objc private func toggleShowSelected() {
@@ -1996,8 +2074,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         updateChrome()
     }
 
-    private func copySelected() {
-        let assets = selectedAssets()
+    private func copyAssets(_ assets: [PHAsset]) {
         guard !assets.isEmpty else { return }
         var items: [[String: Any]] = []
         let group = DispatchGroup()
@@ -2016,8 +2093,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
     }
 
-    private func duplicateSelected() {
-        let assets = selectedAssets()
+    private func duplicateAssets(_ assets: [PHAsset]) {
         setSelecting(false)
         for asset in assets {
             Library.shared.duplicate(asset) { [weak self] ok in
@@ -2026,29 +2102,27 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
     }
 
-    private func hideSelected() {
-        let assets = selectedAssets()
+    private func hideAssets(_ assets: [PHAsset]) {
         guard !assets.isEmpty else { return }
         Library.shared.setHidden(assets, true) { [weak self] ok in
             if ok { self?.setSelecting(false) }
         }
     }
 
-    private func favoriteSelected(_ on: Bool) {
-        for asset in selectedAssets() {
+    private func favoriteAssets(_ assets: [PHAsset], _ on: Bool) {
+        for asset in assets {
             Library.shared.setFavorite(asset, on)
         }
         setSelecting(false)
     }
 
-    private func sendSelected(copy: Bool) {
-        Mover.present(from: self, assets: selectedAssets(), sourceAlbumID: folder.albumID, copy: copy) { [weak self] ok in
+    private func send(_ assets: [PHAsset], copy: Bool) {
+        Mover.present(from: self, assets: assets, sourceAlbumID: folder.albumID, copy: copy) { [weak self] ok in
             if ok { self?.setSelecting(false) }
         }
     }
 
-    private func removeSelectedFromAlbum() {
-        let list = selectedAssets()
+    private func removeFromAlbum(_ list: [PHAsset]) {
         guard !list.isEmpty, let id = folder.albumID, let album = Library.shared.album(id: id) else { return }
         Library.shared.remove(list, from: album) { [weak self] ok in
             if ok {
@@ -2059,7 +2133,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     @objc private func deleteSelected() {
-        let list = selectedAssets()
+        deleteAssets(selectedAssets())
+    }
+
+    private func deleteAssets(_ list: [PHAsset]) {
         guard !list.isEmpty else { return }
         Library.shared.delete(list) { [weak self] ok in
             if ok { self?.setSelecting(false) }
@@ -2158,5 +2235,46 @@ final class LibraryTitleOverlay: UIView {
         subtitleLabel.frame = CGRect(x: leading + 1, y: titleLabel.frame.maxY - 2,
                                      width: min(subtitleLabel.bounds.width, bounds.width - leading * 2),
                                      height: subtitleLabel.bounds.height)
+    }
+}
+
+// MARK: - 길게 누를 때의 사진 미리보기 (사진 비율 그대로, 둥근 모서리)
+
+final class AssetPreviewController: UIViewController {
+    private let asset: PHAsset
+    private let imageView = UIImageView()
+
+    init(asset: PHAsset) {
+        self.asset = asset
+        super.init(nibName: nil, bundle: nil)
+        let screen = UIScreen.main.bounds.size
+        // 순정처럼 메뉴가 한 화면에 다 들어오게 (3:4 사진이 화면 높이의 절반 남짓)
+        let maxWidth = screen.width - 48, maxHeight = screen.height * 0.46
+        let ratio = asset.pixelWidth > 0 && asset.pixelHeight > 0
+            ? CGFloat(asset.pixelWidth) / CGFloat(asset.pixelHeight) : 1
+        var size = CGSize(width: maxWidth, height: maxWidth / ratio)
+        if size.height > maxHeight { size = CGSize(width: maxHeight * ratio, height: maxHeight) }
+        preferredContentSize = size
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        imageView.contentMode = .scaleAspectFill
+        imageView.clipsToBounds = true
+        imageView.frame = view.bounds
+        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(imageView)
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.deliveryMode = .opportunistic
+        let scale = UIScreen.main.scale
+        let target = CGSize(width: preferredContentSize.width * scale, height: preferredContentSize.height * scale)
+        PHImageManager.default().requestImage(for: asset, targetSize: target, contentMode: .aspectFill, options: options) { [weak self] image, _ in
+            if let image { self?.imageView.image = image }
+        }
     }
 }
