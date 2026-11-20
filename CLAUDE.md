@@ -51,4 +51,4 @@ Check the scheme and project names against what `xcodegen generate` actually pro
 6. Pinch in an album and in the library: one solid arrangement scaling with the fingers, a short cross-fade when the column count switches, settles on release, anchor photo stays under the fingers.
 7. Album card zoom open/close (no jolt at the end), folders pushing sideways, back swipes.
 
-Known differences from stock that are not done: no cover-less compact title at 1 column, no library year/month views, no search, Live Photo loop/bounce, captions.
+Known differences from stock that are not done: no cover-less compact title at 1 column, Live Photo loop/bounce, captions, content (object/person) search, grabbing the photo during the 0.3 s opening (UIKit ignores touches during a navigation transition; would need the viewer as an overlay instead of a push). The system multi-select pan never fires with the custom grid layout, so drag-to-select is our own pan (`dragSelected`).
