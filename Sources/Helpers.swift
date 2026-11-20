@@ -78,6 +78,16 @@ enum Prefs {
     private static let defaults = UserDefaults.standard
 
     /// 사진 격자 칸 수
+    static var aspectGrid: Bool {
+        get { defaults.bool(forKey: "aspectGrid") }
+        set { defaults.set(newValue, forKey: "aspectGrid") }
+    }
+
+    static var libraryShowsScreenshots: Bool {
+        get { defaults.object(forKey: "libraryShowsScreenshots") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "libraryShowsScreenshots") }
+    }
+
     static var gridColumns: Int {
         get { defaults.integer(forKey: "gridColumns") }
         set { defaults.set(newValue, forKey: "gridColumns") }

@@ -108,6 +108,14 @@ final class AssetCell: UICollectionViewCell {
         }
     }
 
+    /// 종횡비 격자: 사진 전체가 칸 안에 (잘리지 않게)
+    var aspectFit = false {
+        didSet {
+            imageView.contentMode = aspectFit ? .scaleAspectFit : .scaleAspectFill
+            imageView.backgroundColor = aspectFit ? .clear : .secondarySystemBackground
+        }
+    }
+
     func setFavorite(_ on: Bool) {
         heart.isHidden = !on
     }
@@ -855,7 +863,82 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         return label
     }()
 
+    /// 촘촘한 칸에서 해가 바뀌는 첫 사진마다 붙는 연도 칩 (순정 iOS 27)
+    private var yearStarts: [(flat: Int, year: Int)] = []
+    private var yearStartsVersion = -1
+    private var yearStartsLoading = false
+    private var boundaryChips: [Int: UILabel] = [:]
+
+    private func updateBoundaryChips() {
+        guard folder.id == "all", collectionView != nil else { return }
+        let dense = columns == PhotoGridLayout.denseColumns && moments == nil && !list.isEmpty
+        guard dense else {
+            boundaryChips.values.forEach { $0.removeFromSuperview() }
+            boundaryChips.removeAll()
+            return
+        }
+        if yearStartsVersion != list.version {
+            guard !yearStartsLoading else { return }
+            yearStartsLoading = true
+            let current = list
+            let version = list.version
+            DispatchQueue.global(qos: .userInitiated).async {
+                var starts: [(Int, Int)] = []
+                var last = Int.min
+                let calendar = Calendar.current
+                for (index, asset) in current.array().enumerated() {
+                    guard let date = asset.creationDate else { continue }
+                    let year = calendar.component(.year, from: date)
+                    if year != last { starts.append((index, year)); last = year }
+                }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.yearStartsLoading = false
+                    guard self.list.version == version else { return }
+                    self.yearStarts = starts.map { (flat: $0.0, year: $0.1) }
+                    self.yearStartsVersion = version
+                    self.updateBoundaryChips()
+                }
+            }
+            return
+        }
+        let visible = collectionView.bounds
+        var keep = Set<Int>()
+        // 한 줄에 해가 여럿 바뀌면 그 줄의 마지막 해 하나만, 줄 왼쪽에 (칩끼리 겹치지 않게)
+        var perRow: [CGFloat: (flat: Int, year: Int)] = [:]
+        for start in yearStarts {
+            guard let path = indexPath(forFlat: start.flat),
+                  let frame = gridLayout.layoutAttributesForItem(at: path)?.frame, frame.intersects(visible.insetBy(dx: 0, dy: -40)) else { continue }
+            perRow[frame.minY] = start
+        }
+        for (rowY, start) in perRow {
+            keep.insert(start.flat)
+            let frame = CGRect(x: collectionView.safeAreaInsets.left, y: rowY, width: 0, height: 0)
+            let chip = boundaryChips[start.flat] ?? {
+                let label = ChipLabel()
+                label.font = .systemFont(ofSize: 13, weight: .semibold)
+                label.textColor = .label
+                label.backgroundColor = UIColor.systemBackground.withAlphaComponent(0.85)
+                label.layer.cornerRadius = 11
+                label.layer.cornerCurve = .continuous
+                label.clipsToBounds = true
+                label.text = "\(start.year)년"
+                label.sizeToFit()
+                collectionView.addSubview(label)
+                boundaryChips[start.flat] = label
+                return label
+            }()
+            chip.frame = CGRect(x: frame.minX + 6, y: frame.minY + 4, width: chip.bounds.width, height: 22)
+            chip.layer.zPosition = 10
+        }
+        for (flat, chip) in boundaryChips where !keep.contains(flat) {
+            chip.removeFromSuperview()
+            boundaryChips[flat] = nil
+        }
+    }
+
     private func updateYearChip() {
+        updateBoundaryChips()
         guard folder.id == "all", collectionView != nil else { return }
         // 한 화면에 다 들어오면(아래에 붙은 짧은 목록) 칩 없이
         let show = columns == PhotoGridLayout.denseColumns && moments == nil && !list.isEmpty
@@ -996,6 +1079,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         updateThumbSize()
         collectionView.reloadData()
         collectionView.layoutIfNeeded()
+        alignShortContentToBottom()
+        scrollToLatest()
+        updateYearChip()
     }
 
     /// 사진이 한 화면보다 적으면 순정처럼 최신이 있는 아래쪽에 붙임 (제목 밑에 가리지 않게)
@@ -1696,12 +1782,17 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let needsFilter: Bool
         switch libraryFilter {
         case .all: needsFilter = false
+        case .notInAlbum: needsFilter = folder.id != "all"
         case .favorites, .videos: needsFilter = folder.id != "all"
         case .photos, .screenshots, .live: needsFilter = true
         }
-        guard needsFilter else { return result }
+        // 보기 옵션: 스크린샷을 보관함에서 빼기 (순정 보기 옵션 › 보기: 스크린샷)
+        let hideScreens = folder.id == "all" && !Prefs.libraryShowsScreenshots && libraryFilter != .screenshots
+        guard needsFilter || hideScreens else { return result }
         let filter = libraryFilter
-        return AssetList.make(result.array().filter { filter.matches($0) })
+        return AssetList.make(result.array().filter {
+            (!needsFilter || filter.matches($0)) && !(hideScreens && $0.mediaSubtypes.contains(.photoScreenshot))
+        })
     }
 
     /// 실제로 읽는 목록 (보관함은 필터에 따라 즐겨찾기·비디오 목록으로)
@@ -1710,6 +1801,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         switch libraryFilter {
         case .favorites: return "favorites"
         case .videos: return "videos"
+        case .notInAlbum: return "unsorted"
         default: return "all"
         }
     }
@@ -1823,6 +1915,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         applyZoomCollapse(to: cell)
         cell.setDuration(asset.mediaType == .video ? asset.duration : nil)
         cell.setFavorite(asset.isFavorite)
+        cell.aspectFit = Prefs.aspectGrid && columns > 1
         loadThumbnail(into: cell, asset: asset)
         return cell
     }
@@ -2307,12 +2400,45 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             action(.live, "Live Photo", "livephoto"),
             action(.screenshots, "스크린샷", "camera.viewfinder"),
         ])
-        let filters = UIMenu(title: "필터:", options: .displayInline, children: [
-            action(.all, "모든 항목", "square.grid.3x3"),
-            action(.favorites, "즐겨찾기", "heart"),
-            media,
-        ])
-        return UIMenu(children: [filters, UIMenu(options: .displayInline, children: [makeSortMenu()])])
+        var filterItems: [UIMenuElement] = [action(.all, "모든 항목", "square.grid.3x3"), action(.favorites, "즐겨찾기", "heart")]
+        if folder.id == "all" {
+            filterItems.append(action(.notInAlbum, "앨범에 포함되지 않음", "rectangle.stack.badge.minus"))
+        }
+        filterItems.append(media)
+        let filters = UIMenu(title: "필터:", options: .displayInline, children: filterItems)
+        // 순정 보기 옵션: 확대 · 축소 · 종횡비 격자 / 보기: 스크린샷
+        var viewItems: [UIMenuElement] = [
+            UIAction(title: "확대", image: UIImage(systemName: "plus.magnifyingglass"),
+                     attributes: levels.first == columns ? .disabled : []) { [weak self] _ in self?.stepColumns(-1) },
+            UIAction(title: "축소", image: UIImage(systemName: "minus.magnifyingglass"),
+                     attributes: levels.last == columns ? .disabled : []) { [weak self] _ in self?.stepColumns(1) },
+            UIAction(title: "종횡비 격자", image: UIImage(systemName: "aspectratio"),
+                     state: Prefs.aspectGrid ? .on : .off) { [weak self] _ in
+                Prefs.aspectGrid.toggle()
+                self?.collectionView.reloadData()
+                self?.updateChrome()
+            },
+        ]
+        if folder.id == "all" {
+            viewItems.append(UIMenu(title: "보기:", options: .displayInline, children: [
+                UIAction(title: "스크린샷", image: UIImage(systemName: "camera.viewfinder"),
+                         state: Prefs.libraryShowsScreenshots ? .on : .off) { [weak self] _ in
+                    Prefs.libraryShowsScreenshots.toggle()
+                    self?.reloadFromLibrary(force: true)
+                    self?.updateChrome()
+                },
+            ]))
+        }
+        let viewOptions = UIMenu(title: "보기 옵션", children: viewItems)
+        return UIMenu(children: [filters, UIMenu(options: .displayInline, children: [makeSortMenu(), viewOptions])])
+    }
+
+    /// 보기 옵션의 확대(-1) · 축소(+1): 칸 수 한 단계
+    private func stepColumns(_ step: Int) {
+        guard let index = levels.firstIndex(of: columns), levels.indices.contains(index + step) else { return }
+        setColumnsDirectly(levels[index + step])
+        updateModeBar()
+        updateChrome()
     }
 
     private func setLibraryFilter(_ filter: LibraryFilter) {
@@ -2542,11 +2668,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 // MARK: - 보관함 필터
 
 enum LibraryFilter {
-    case all, favorites, videos, photos, screenshots, live
+    case all, favorites, videos, photos, screenshots, live, notInAlbum
 
     func matches(_ asset: PHAsset) -> Bool {
         switch self {
-        case .all: return true
+        case .all, .notInAlbum: return true
         case .favorites: return asset.isFavorite
         case .videos: return asset.mediaType == .video
         case .photos: return asset.mediaType == .image
