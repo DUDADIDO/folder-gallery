@@ -1001,35 +1001,113 @@ final class DateAdjustViewController: UIViewController {
         fatalError("init(coder:) has not been implemented")
     }
 
+    private let adjustedValue = UILabel()
+
+    /// "2026. 11. 17. 오후 9:47:06" (순정 표기)
+    private static let stamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+        return formatter
+    }()
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemGroupedBackground
         title = "날짜 및 시간 조정"
-        navigationItem.leftBarButtonItem = UIBarButtonItem(title: "취소", style: .plain, target: self, action: #selector(cancel))
+        // 순정 iOS 27: 왼쪽 X, 오른쪽 파란 "조정"
+        navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .close, target: self, action: #selector(cancel))
         navigationItem.rightBarButtonItem = UIBarButtonItem(title: "조정", style: .done, target: self, action: #selector(saveTapped))
 
-        let originalLabel = UILabel()
-        originalLabel.text = "원본: " + DateText.long(original)
-        originalLabel.font = .systemFont(ofSize: 15)
-        originalLabel.textColor = .secondaryLabel
-        originalLabel.numberOfLines = 0
+        func row(_ title: String, _ value: UILabel, valueColor: UIColor) -> UIView {
+            let titleLabel = UILabel()
+            titleLabel.text = title
+            titleLabel.font = .preferredFont(forTextStyle: .body)
+            value.font = .preferredFont(forTextStyle: .body)
+            value.textColor = valueColor
+            value.textAlignment = .right
+            value.adjustsFontSizeToFitWidth = true
+            value.minimumScaleFactor = 0.7
+            let stack = UIStackView(arrangedSubviews: [titleLabel, value])
+            stack.spacing = 12
+            titleLabel.setContentHuggingPriority(.required, for: .horizontal)
+            titleLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+            stack.heightAnchor.constraint(greaterThanOrEqualToConstant: 52).isActive = true
+            return stack
+        }
+        func divider() -> UIView {
+            let line = UIView()
+            line.backgroundColor = .separator
+            line.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale).isActive = true
+            return line
+        }
+        func card(_ views: [UIView]) -> UIView {
+            let stack = UIStackView(arrangedSubviews: views)
+            stack.axis = .vertical
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            let card = UIView()
+            card.backgroundColor = .secondarySystemGroupedBackground
+            card.layer.cornerRadius = 26
+            card.layer.cornerCurve = .continuous
+            card.addSubview(stack)
+            NSLayoutConstraint.activate([
+                stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 4),
+                stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -4),
+                stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
+                stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+            ])
+            return card
+        }
 
+        // 위 카드: 원본 / 조정 후
+        let originalValue = UILabel()
+        originalValue.text = Self.stamp.string(from: original)
+        adjustedValue.text = Self.stamp.string(from: original)
+        let top = card([row("원본", originalValue, valueColor: .tertiaryLabel), divider(),
+                        row("조정 후", adjustedValue, valueColor: .secondaryLabel)])
+
+        // 아래 카드: 달력 + 시간, 시간대
         picker.datePickerMode = .dateAndTime
         picker.preferredDatePickerStyle = .inline
         picker.locale = Locale(identifier: "ko_KR")
         picker.date = original
+        picker.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            self.adjustedValue.text = Self.stamp.string(from: self.picker.date)
+        }, for: .valueChanged)
+        let zoneValue = UILabel()
+        zoneValue.text = Self.zoneName(TimeZone.current)
+        let bottom = card([picker, divider(), row("시간대", zoneValue, valueColor: .secondaryLabel)])
 
-        let stack = UIStackView(arrangedSubviews: [originalLabel, picker])
-        stack.axis = .vertical
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
-        let guide = view.safeAreaLayoutGuide
+        let scroll = UIScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.alwaysBounceVertical = true
+        view.addSubview(scroll)
+        let content = UIStackView(arrangedSubviews: [top, bottom])
+        content.axis = .vertical
+        content.spacing = 28
+        content.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(content)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: guide.topAnchor, constant: 16),
-            stack.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            scroll.topAnchor.constraint(equalTo: view.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 24),
+            content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
+            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 16),
+            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -16),
         ])
+    }
+
+    /// 시간대 도시 이름 (순정처럼 "서울")
+    private static func zoneName(_ zone: TimeZone) -> String {
+        let known = ["Asia/Seoul": "서울", "Asia/Tokyo": "도쿄", "America/Los_Angeles": "로스앤젤레스",
+                     "America/New_York": "뉴욕", "Europe/London": "런던", "Europe/Paris": "파리"]
+        if let name = known[zone.identifier] { return name }
+        return zone.identifier.split(separator: "/").last.map { $0.replacingOccurrences(of: "_", with: " ") }
+            ?? zone.localizedName(for: .generic, locale: Locale(identifier: "ko_KR")) ?? zone.identifier
     }
 
     @objc private func cancel() {

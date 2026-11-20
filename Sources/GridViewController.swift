@@ -2218,9 +2218,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 사진 메뉴 (길게 누르기 · 선택 중 ⋯ 공용). single 이면 공유·정보 조정·삭제까지 (순정 길게 누르기 메뉴)
     private func makeAssetMenu(_ assets: [PHAsset], single: Bool) -> UIMenu {
         let top = UIMenu(options: .displayInline, preferredElementSize: .medium, children: [
-            UIAction(title: "복사", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in self?.copyAssets(assets) },
-            UIAction(title: "복제", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in self?.duplicateAssets(assets) },
-            UIAction(title: "가리기", image: UIImage(systemName: "eye.slash")) { [weak self] _ in self?.hideAssets(assets) },
+            UIAction(title: "복사", image: UIImage(systemName: "doc.on.doc.fill")) { [weak self] _ in self?.copyAssets(assets) },
+            UIAction(title: "복제", image: UIImage(systemName: "plus.square.fill.on.square.fill")) { [weak self] _ in self?.duplicateAssets(assets) },
+            UIAction(title: "가리기", image: UIImage(systemName: "eye.slash.fill")) { [weak self] _ in self?.hideAssets(assets) },
         ])
         let allFavorite = !assets.isEmpty && assets.allSatisfy(\.isFavorite)
         var middle: [UIMenuElement] = []

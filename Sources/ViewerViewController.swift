@@ -2090,9 +2090,9 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     /// 위 줄(복사 · 복제 · 가리기) / 슬라이드쇼 시작 / 추가 대상 › / 정보 조정 ›
     private func makeMoreMenu() -> UIMenu {
         let top = UIMenu(options: .displayInline, preferredElementSize: .medium, children: [
-            UIAction(title: "복사", image: UIImage(systemName: "doc.on.doc")) { [weak self] _ in self?.copyCurrent() },
-            UIAction(title: "복제", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in self?.duplicateCurrent() },
-            UIAction(title: "가리기", image: UIImage(systemName: "eye.slash")) { [weak self] _ in self?.hideCurrent() },
+            UIAction(title: "복사", image: UIImage(systemName: "doc.on.doc.fill")) { [weak self] _ in self?.copyCurrent() },
+            UIAction(title: "복제", image: UIImage(systemName: "plus.square.fill.on.square.fill")) { [weak self] _ in self?.duplicateCurrent() },
+            UIAction(title: "가리기", image: UIImage(systemName: "eye.slash.fill")) { [weak self] _ in self?.hideCurrent() },
         ])
         let slideshow = UIMenu(options: .displayInline, children: [
             UIAction(title: "슬라이드쇼 시작", image: UIImage(systemName: "play.rectangle")) { [weak self] _ in self?.startSlideshow() },
