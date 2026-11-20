@@ -349,7 +349,7 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemGroupedBackground
+        view.backgroundColor = .systemBackground
         // 순정 iOS 27 모음처럼: 탭 첫 화면(앨범·숨긴 앨범)은 왼쪽 큰 제목, 폴더 안은 작은 제목
         navigationItem.largeTitleDisplayMode = mode == .top || mode == .hidden ? .always : .never
         switch mode {
@@ -363,7 +363,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
 
         collectionView = UICollectionView(frame: view.bounds, collectionViewLayout: makeLayout())
         collectionView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        collectionView.backgroundColor = .systemGroupedBackground
+        // 순정 '앨범' 화면처럼 흰 바탕
+        collectionView.backgroundColor = .systemBackground
         collectionView.alwaysBounceVertical = true
         collectionView.dataSource = self
         collectionView.delegate = self
@@ -446,7 +447,7 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
 
     private func makeLayout() -> UICollectionViewLayout {
         UICollectionViewCompositionalLayout { [weak self] index, environment in
-            // 순정 iOS 27 모음: 양옆 16, 카드 사이 8, 한 줄에 3칸 (iPhone 14 Pro 에서 약 115pt)
+            // 순정 iOS 27: 양옆 16, 카드 사이 8. 자동 분류 줄은 모음의 앨범 줄처럼 한 화면에 3칸 (약 115pt)
             let inset: CGFloat = 16
             let gap: CGFloat = 8
             let width = environment.container.effectiveContentSize.width
@@ -478,8 +479,8 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
                 section = NSCollectionLayoutSection(group: group)
                 section.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: inset, bottom: 24, trailing: inset)
             } else {
-                // 칸 크기를 화면 너비에서 직접 계산 (세 칸, 순정 모음과 같게)
-                let side = cardSide
+                // 순정 iOS 27 '앨범' 화면: 두 칸 (양옆 16, 사이 8 — iPhone 14 Pro 에서 약 176pt)
+                let side = max(80, floor((width - inset * 2 - gap) / 2))
                 let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(widthDimension: .absolute(side),
                                                                                      heightDimension: .absolute(side)))
                 let groupSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(side))
