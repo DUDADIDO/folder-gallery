@@ -942,6 +942,16 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     private func presentSearch() {
+        // 탭 막대에 검색 탭이 있으면 그 탭으로 (순정처럼 같은 검색 화면)
+        if let tabs = tabBarController,
+           let index = tabs.viewControllers?.firstIndex(where: { ($0 as? UINavigationController)?.viewControllers.first is SearchViewController }) {
+            tabs.selectedIndex = index
+            return
+        }
+        if #available(iOS 26.0, *), let tabs = tabBarController, let search = tabs.tabs.first(where: { $0 is UISearchTab }) {
+            tabs.selectedTab = search
+            return
+        }
         let search = SearchViewController()
         search.onOpenFolder = { [weak self] id in self?.openFolderFromSearch(id) }
         let nav = UINavigationController(rootViewController: search)

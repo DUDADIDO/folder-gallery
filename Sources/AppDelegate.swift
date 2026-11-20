@@ -54,7 +54,28 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
         }
 
         let tabs = UITabBarController()
-        tabs.viewControllers = [libraryNav, albumsNav, unsortedNav, hiddenNav]
+        if #available(iOS 26.0, *) {
+            // 순정 iOS 27 처럼 탭 막대 오른쪽에 따로 떨어진 둥근 검색 버튼 (search 역할 탭)
+            func tab(_ nav: UINavigationController, _ id: String) -> UITab {
+                UITab(title: nav.tabBarItem.title ?? "", image: nav.tabBarItem.image, identifier: id) { _ in nav }
+            }
+            let search = UISearchTab { [weak self] _ in
+                let controller = SearchViewController()
+                controller.onOpenFolder = { id in self?.openFolder(id) }
+                let nav = TopStyledNavigationController(rootViewController: controller)
+                nav.navigationBar.prefersLargeTitles = true
+                return nav
+            }
+            search.automaticallyActivatesSearch = true
+            tabs.tabs = [tab(libraryNav, "library"), tab(albumsNav, "albums"), tab(unsortedNav, "unsorted"),
+                         tab(hiddenNav, "hidden"), search]
+            // iOS 27: 검색 탭을 따로 떨어진 둥근 버튼으로 (순정과 같은 자리)
+            if #available(iOS 27.0, *) {
+                tabs.prominentTabIdentifier = search.identifier
+            }
+        } else {
+            tabs.viewControllers = [libraryNav, albumsNav, unsortedNav, hiddenNav]
+        }
         tabs.selectedIndex = 1   // 켜면 앨범 탭부터
         tabs.delegate = self
         window.rootViewController = tabs
@@ -71,6 +92,17 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
             grid.scrollToLatest(animated: true)
         }
         return true
+    }
+
+    /// 검색에서 앨범을 고름: 앨범 탭에서 그 앨범을 엶
+    private func openFolder(_ id: String) {
+        guard let folder = Library.shared.snapshot.folders.first(where: { $0.id == id }),
+              let tabs = window?.rootViewController as? UITabBarController,
+              let albums = tabs.viewControllers?.compactMap({ $0 as? UINavigationController })
+                .first(where: { $0.viewControllers.first is FoldersViewController && $0 !== hiddenNav }) else { return }
+        if let index = tabs.viewControllers?.firstIndex(where: { $0 === albums }) { tabs.selectedIndex = index }
+        albums.popToRootViewController(animated: false)
+        albums.pushViewController(GridViewController(folder: folder), animated: true)
     }
 
     /// 숨긴 앨범 탭을 벗어나면 다시 잠금

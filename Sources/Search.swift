@@ -134,10 +134,15 @@ final class SearchViewController: UIViewController, UITableViewDataSource, UITab
         title = "검색"
         navigationItem.largeTitleDisplayMode = .always
         navigationController?.navigationBar.prefersLargeTitles = true
-        navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
-            self?.dismiss(animated: true)
-        })
+        // 따로 띄웠을 때만 닫기 (검색 탭 안에서는 없음)
+        if navigationController?.presentingViewController != nil {
+            navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
+                self?.dismiss(animated: true)
+            })
+        }
 
+        // 순정 검색 화면처럼 흰 바탕
+        tableView.backgroundColor = .systemBackground
         tableView.dataSource = self
         tableView.delegate = self
         tableView.keyboardDismissMode = .interactive
@@ -240,7 +245,12 @@ final class SearchViewController: UIViewController, UITableViewDataSource, UITab
         let hit = hits[indexPath.row]
         if let text = searchBar.text { PhotoSearch.remember(text) }
         if let folderID = hit.folderID {
-            dismiss(animated: true) { [onOpenFolder] in onOpenFolder?(folderID) }
+            if navigationController?.presentingViewController != nil {
+                dismiss(animated: true) { [onOpenFolder] in onOpenFolder?(folderID) }
+            } else {
+                searchBar.resignFirstResponder()
+                onOpenFolder?(folderID)
+            }
             return
         }
         navigationController?.pushViewController(SearchResultsViewController(title: hit.title, assets: hit.assets), animated: true)
