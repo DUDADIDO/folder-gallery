@@ -1214,6 +1214,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        DispatchQueue.main.async { [weak self] in self?.runActionAfterOpening() }
         // 전환을 취소하고 돌아왔을 때도 다시 막음
         blockSwipeAnywhereIfAlbum()
         // 열림이 끝났거나 닫기를 취소하고 돌아옴: 숨긴 것이 남지 않게
@@ -1836,6 +1837,25 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     private func isAddTile(_ indexPath: IndexPath) -> Bool {
         showsAddTile && indexPath.section == sections.count - 1 && indexPath.item == sections[indexPath.section].range.count
+    }
+
+    /// 앨범 목록의 꾹 누른 메뉴에서 고른 것 (열린 뒤 한 번 실행)
+    enum OpenAction { case addPhotos, slideshow }
+    var actionAfterOpening: OpenAction?
+
+    private func runActionAfterOpening(tries: Int = 0) {
+        guard let action = actionAfterOpening else { return }
+        // 확대 전환이 다 끝나고 화면에 올라온 뒤에 띄움 (전환 중에는 띄우는 게 무시됨)
+        if (transitionCoordinator != nil || view.window == nil || presentedViewController != nil
+            || navigationController?.transitionCoordinator != nil), tries < 20 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.runActionAfterOpening(tries: tries + 1) }
+            return
+        }
+        actionAfterOpening = nil
+        switch action {
+        case .addPhotos: presentAddPicker()
+        case .slideshow: startSlideshow()
+        }
     }
 
     private func presentAddPicker() {

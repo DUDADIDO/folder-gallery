@@ -821,6 +821,9 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         collectionView.deselectItem(at: indexPath, animated: false)
         guard let folder = folder(at: indexPath) else { return }
         let next: UIViewController = folder.isGroup ? FoldersViewController(mode: .folder(folder.id)) : GridViewController(folder: folder)
+        // 꾹 누른 메뉴의 '사진 추가'·'슬라이드쇼'는 앨범을 연 뒤에 실행
+        (next as? GridViewController)?.actionAfterOpening = pendingOpenAction
+        pendingOpenAction = nil
         // 앨범은 카드에서 커지며 열림. 폴더는 순정처럼 오른쪽에서 밀려 들어옴
         if !folder.isGroup, #available(iOS 18.0, *) {
             let id = folder.id
@@ -912,20 +915,42 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         guard let indexPath = indexPaths.first, let folder = folder(at: indexPath) else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             guard let self else { return nil }
-            return UIMenu(children: self.menuElements(for: folder))
+            return UIMenu(children: self.menuElements(for: folder, at: indexPath))
         }
     }
 
-    private func menuElements(for folder: Folder) -> [UIMenuElement] {
+    /// 순정 iOS 27 의 앨범 카드 메뉴 짜임: [이름 · 사진 추가] / [슬라이드쇼 · 삭제] / 우리 앱만의 [폴더로 이동 · 숨기기]
+    private func menuElements(for folder: Folder, at indexPath: IndexPath) -> [UIMenuElement] {
         var elements: [UIMenuElement] = []
         let snapshot = Library.shared.snapshot
+        var top: [UIMenuElement] = []
+        var middle: [UIMenuElement] = []
 
         if !folder.isAuto {
-            elements.append(UIAction(title: folder.isGroup ? "폴더 이름 변경" : "앨범 이름 변경", image: UIImage(systemName: "pencil")) { [weak self] _ in
+            top.append(UIAction(title: folder.isGroup ? "폴더 이름 변경" : "앨범 이름 변경", image: UIImage(systemName: "pencil")) { [weak self] _ in
                 self?.promptText(title: "이름 변경", initial: folder.title, placeholder: "이름", confirm: "저장") { name in
                     Library.shared.rename(folder.id, to: name)
                 }
             })
+        }
+        if !folder.isGroup {
+            if !folder.isAuto, folder.albumID != nil {
+                top.append(UIAction(title: "사진 추가", image: UIImage(systemName: "plus")) { [weak self] _ in
+                    self?.open(at: indexPath, then: .addPhotos)
+                })
+            }
+            middle.append(UIAction(title: "슬라이드쇼 재생", image: UIImage(systemName: "play.rectangle")) { [weak self] _ in
+                self?.open(at: indexPath, then: .slideshow)
+            })
+        }
+        if !folder.isAuto {
+            middle.append(UIAction(title: folder.isGroup ? "폴더 삭제" : "앨범 삭제", image: UIImage(systemName: "trash"),
+                                   attributes: .destructive) { [weak self] _ in
+                self?.deleteCollection(folder)
+            })
+        }
+
+        if !folder.isAuto {
 
             // 폴더로 이동 ▸ (사진 앱의 폴더 목록)
             var targets: [UIMenuElement] = []
@@ -963,13 +988,23 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
             })
         }
 
-        if !folder.isAuto {
-            elements.append(UIAction(title: folder.isGroup ? "폴더 삭제" : "앨범 삭제", image: UIImage(systemName: "trash"),
-                                     attributes: .destructive) { [weak self] _ in
-                self?.deleteCollection(folder)
-            })
+        var sections: [UIMenuElement] = []
+        if !top.isEmpty { sections.append(UIMenu(options: .displayInline, children: top)) }
+        if !middle.isEmpty { sections.append(UIMenu(options: .displayInline, children: middle)) }
+        if !elements.isEmpty { sections.append(UIMenu(options: .displayInline, children: elements)) }
+        return sections
+    }
+
+    /// 메뉴에서 고른 동작을 앨범을 연 뒤에 실행
+    private var pendingOpenAction: GridViewController.OpenAction?
+
+    private func open(at indexPath: IndexPath, then action: GridViewController.OpenAction) {
+        pendingOpenAction = action
+        // 메뉴가 다 닫힌 뒤 카드에서 열리게
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self else { return }
+            self.collectionView(self.collectionView, didSelectItemAt: indexPath)
         }
-        return elements
     }
 
     private func setHidden(_ folder: Folder, _ on: Bool) {
