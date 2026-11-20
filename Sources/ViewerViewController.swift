@@ -2071,7 +2071,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     @objc private func shareCurrent() {
         guard let asset = currentAsset else { return }
-        Sharer.share([asset], from: self, barButtonItem: shareItem)
+        Sharer.share([asset], from: self, barButtonItem: shareItem) { [weak self] in self?.addToAlbum() }
     }
 
     @objc private func toggleFavorite() {

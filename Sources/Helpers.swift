@@ -1,3 +1,4 @@
+import LinkPresentation
 import Photos
 import UIKit
 
@@ -254,7 +255,9 @@ enum Mover {
 
 enum Sharer {
     /// 원본 파일을 임시 폴더에 꺼낸 뒤 공유 시트를 띄움
-    static func share(_ assets: [PHAsset], from host: UIViewController, barButtonItem: UIBarButtonItem?) {
+    /// addToAlbum: 순정 공유 시트의 '앨범에 추가' 자리 (시트가 닫힌 뒤 부름)
+    static func share(_ assets: [PHAsset], from host: UIViewController, barButtonItem: UIBarButtonItem?,
+                      addToAlbum: (() -> Void)? = nil) {
         guard !assets.isEmpty else { return }
         let total = assets.count
         let cancelled = Flag()
@@ -277,19 +280,38 @@ enum Sharer {
                 DispatchQueue.main.async {
                     if cancelled.on { return }
                     progress.dismiss(animated: true) {
-                        present(result, from: host, barButtonItem: barButtonItem)
+                        present(result, assets: assets, from: host, barButtonItem: barButtonItem, addToAlbum: addToAlbum)
                     }
                 }
             }
         }
     }
 
-    private static func present(_ urls: [URL], from host: UIViewController, barButtonItem: UIBarButtonItem?) {
+    private static func present(_ urls: [URL], assets: [PHAsset], from host: UIViewController,
+                                barButtonItem: UIBarButtonItem?, addToAlbum: (() -> Void)?) {
         guard !urls.isEmpty else {
             host.toast("공유할 파일을 준비하지 못했어요")
             return
         }
-        let sheet = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+        // 머리글은 파일 이름 대신 순정처럼 "사진 N장 선택됨" + 첫 사진
+        let photos = assets.filter { $0.mediaType == .image }.count
+        let videos = assets.filter { $0.mediaType == .video }.count
+        let title: String
+        if videos == 0 {
+            title = "사진 \(photos)장 선택됨"
+        } else if photos == 0 {
+            title = "비디오 \(videos)개 선택됨"
+        } else {
+            title = "항목 \(assets.count)개 선택됨"
+        }
+        let items = urls.enumerated().map { index, url in
+            ShareFileSource(url: url, title: index == 0 ? title : nil)
+        }
+        var activities: [UIActivity] = []
+        if let addToAlbum { activities.append(AddToAlbumActivity(action: addToAlbum)) }
+        let sheet = UIActivityViewController(activityItems: items, applicationActivities: activities)
+        // 사진 앱 안에서 '이미지 저장'은 같은 사진을 하나 더 만들 뿐이라 뺌 (순정에도 없음)
+        sheet.excludedActivityTypes = [.saveToCameraRoll]
         if let popover = sheet.popoverPresentationController {
             if let barButtonItem {
                 popover.barButtonItem = barButtonItem
@@ -399,5 +421,62 @@ extension UINavigationController {
         if #available(iOS 18.0, *), let tabs = tabBarController, tabs.isTabBarHidden {
             tabs.setTabBarHidden(false, animated: false)
         }
+    }
+}
+
+/// 공유할 파일 하나. 첫 파일은 시트 머리글(제목·미리보기)을 순정처럼 채움
+final class ShareFileSource: NSObject, UIActivityItemSource {
+    private let url: URL
+    private let title: String?
+
+    init(url: URL, title: String?) {
+        self.url = url
+        self.title = title
+    }
+
+    func activityViewControllerPlaceholderItem(_ activityViewController: UIActivityViewController) -> Any {
+        url
+    }
+
+    func activityViewController(_ activityViewController: UIActivityViewController,
+                                itemForActivityType activityType: UIActivity.ActivityType?) -> Any? {
+        url
+    }
+
+    func activityViewControllerLinkMetadata(_ activityViewController: UIActivityViewController) -> LPLinkMetadata? {
+        guard let title else { return nil }
+        let metadata = LPLinkMetadata()
+        metadata.title = title
+        metadata.originalURL = url
+        metadata.url = url
+        if let image = UIImage(contentsOfFile: url.path)?.preparingThumbnail(of: CGSize(width: 240, height: 240)) {
+            let provider = NSItemProvider(object: image)
+            metadata.imageProvider = provider
+            metadata.iconProvider = provider
+        }
+        return metadata
+    }
+}
+
+/// 공유 시트의 '앨범에 추가' (순정 사진 앱 공유 시트에 있는 것)
+final class AddToAlbumActivity: UIActivity {
+    private let action: () -> Void
+
+    init(action: @escaping () -> Void) {
+        self.action = action
+        super.init()
+    }
+
+    override class var activityCategory: UIActivity.Category { .action }
+    override var activityType: UIActivity.ActivityType? { UIActivity.ActivityType("com.dudadido.gallery.addToAlbum") }
+    override var activityTitle: String? { "앨범에 추가" }
+    override var activityImage: UIImage? { UIImage(systemName: "rectangle.stack.badge.plus") }
+    override func canPerform(withActivityItems activityItems: [Any]) -> Bool { true }
+
+    override func perform() {
+        activityDidFinish(true)
+        // 공유 시트가 다 닫힌 뒤 앨범 고르기를 띄움
+        let action = self.action
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { action() }
     }
 }

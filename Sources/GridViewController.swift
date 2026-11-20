@@ -2227,7 +2227,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if single {
             middle.append(UIAction(title: "공유", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
                 guard let self else { return }
-                Sharer.share(assets, from: self, barButtonItem: nil)
+                Sharer.share(assets, from: self, barButtonItem: nil) { [weak self] in self?.send(assets, copy: true) }
             })
         }
         middle.append(UIAction(title: allFavorite ? "즐겨찾기 해제" : "즐겨찾기",
@@ -2649,7 +2649,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     // MARK: - 아래 막대
 
     @objc private func shareSelected() {
-        Sharer.share(selectedAssets(), from: self, barButtonItem: shareItem)
+        let assets = selectedAssets()
+        Sharer.share(assets, from: self, barButtonItem: shareItem) { [weak self] in self?.send(assets, copy: true) }
     }
 
     /// 갤럭시의 '더보기': 앨범으로 이동 · 앨범으로 복사
