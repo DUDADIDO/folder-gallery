@@ -1014,11 +1014,18 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if atLatest {
             return "\(list.count.formatted())개의 항목"
         }
-        let probe = CGPoint(x: collectionView.bounds.midX, y: offset + inset.top + 4)
-        let path = collectionView.indexPathForItem(at: probe)
-            ?? collectionView.indexPathsForVisibleItems.min()
-        guard let path, let date = list[flatIndex(path)].creationDate else { return nil }
-        return LibraryTitleOverlay.dateText(date)
+        // 순정 iOS 27: 제목 밑 첫 줄에 여러 날이 섞이면 "11월 17일~19일"처럼 범위로
+        let y = offset + inset.top + 4
+        let width = collectionView.bounds.width
+        var dates: [Date] = []
+        for x in stride(from: CGFloat(4), to: width, by: max(8, width / CGFloat(max(1, columns)))) {
+            if let path = collectionView.indexPathForItem(at: CGPoint(x: x, y: y)),
+               let date = list[flatIndex(path)].creationDate { dates.append(date) }
+        }
+        if dates.isEmpty, let path = collectionView.indexPathsForVisibleItems.min(),
+           let date = list[flatIndex(path)].creationDate { dates.append(date) }
+        guard let first = dates.min(), let last = dates.max() else { return nil }
+        return LibraryTitleOverlay.rangeText(first, last)
     }
 
     /// 최신 사진이 있는 끝으로 (오래된 순이면 맨 아래)
@@ -2567,6 +2574,20 @@ final class LibraryTitleOverlay: UIView {
 
     static func dateText(_ date: Date) -> String {
         dateFormatter.string(from: date)
+    }
+
+    /// 같은 날: 2026년 11월 18일 / 같은 달: 2026년 11월 17일~19일 / 같은 해: 2026년 10월 30일~11월 2일 / 그 밖: 2025년 12월~2026년 1월
+    static func rangeText(_ first: Date, _ last: Date) -> String {
+        let calendar = Calendar.current
+        let a = calendar.dateComponents([.year, .month, .day], from: first)
+        let b = calendar.dateComponents([.year, .month, .day], from: last)
+        guard let ay = a.year, let am = a.month, let ad = a.day, let by = b.year, let bm = b.month, let bd = b.day else {
+            return dateText(first)
+        }
+        if ay == by && am == bm && ad == bd { return "\(ay)년 \(am)월 \(ad)일" }
+        if ay == by && am == bm { return "\(ay)년 \(am)월 \(ad)일~\(bd)일" }
+        if ay == by { return "\(ay)년 \(am)월 \(ad)일~\(bm)월 \(bd)일" }
+        return "\(ay)년 \(am)월~\(by)년 \(bm)월"
     }
 
     override init(frame: CGRect) {
