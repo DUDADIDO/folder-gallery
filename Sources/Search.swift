@@ -24,6 +24,16 @@ enum PhotoSearch {
         set { UserDefaults.standard.set(Array(newValue.prefix(10)), forKey: recentKey) }
     }
 
+    /// 추천: 지난 계절 ("2025년 가을")
+    static func seasonSuggestion(now: Date = Date()) -> String {
+        let calendar = Calendar.current
+        var c = calendar.dateComponents([.year, .month], from: calendar.date(byAdding: .month, value: -3, to: now) ?? now)
+        let month = c.month ?? 1
+        let name = [3, 4, 5].contains(month) ? "봄" : ([6, 7, 8].contains(month) ? "여름" : ([9, 10, 11].contains(month) ? "가을" : "겨울"))
+        if name == "겨울", month <= 2 { c.year = (c.year ?? 0) - 1 }
+        return "\(c.year ?? 0)년 \(name)"
+    }
+
     static func remember(_ text: String) {
         var list = recent.filter { $0 != text }
         list.insert(text, at: 0)
@@ -94,6 +104,22 @@ enum PhotoSearch {
         if text == "어제" { return DateMatch(title: "어제") { calendar.isDateInYesterday($0) } }
         if text == "올해" { return DateMatch(title: "\(thisYear)년") { calendar.component(.year, from: $0) == thisYear } }
         if text == "작년" { return DateMatch(title: "\(thisYear - 1)년") { calendar.component(.year, from: $0) == thisYear - 1 } }
+
+        // 계절: "2025년 가을", "가을"
+        let seasons: [(String, [Int])] = [("봄", [3, 4, 5]), ("여름", [6, 7, 8]), ("가을", [9, 10, 11]), ("겨울", [12, 1, 2])]
+        if let season = seasons.first(where: { text.hasSuffix($0.0) }) {
+            let yearText = text.dropLast(season.0.count).filter(\.isNumber)
+            let year = Int(yearText)
+            let title = (year.map { "\($0)년 " } ?? "") + season.0
+            return DateMatch(title: title) { date in
+                let c = calendar.dateComponents([.year, .month], from: date)
+                guard let month = c.month, season.1.contains(month) else { return false }
+                guard let year else { return true }
+                // 겨울은 12월이 그해, 1·2월은 다음 해
+                let seasonYear = (season.0 == "겨울" && month <= 2) ? (c.year ?? 0) - 1 : (c.year ?? 0)
+                return seasonYear == year
+            }
+        }
 
         func number(before suffix: String) -> Int? {
             guard let range = text.range(of: "(\\d+)\\s*" + suffix, options: .regularExpression) else { return nil }
@@ -169,18 +195,60 @@ final class SearchViewController: UIViewController, UITableViewDataSource, UITab
         let list = Library.shared.list(for: "all", newestFirst: false)
         DispatchQueue.global(qos: .userInitiated).async {
             let all = list.array()
-            DispatchQueue.main.async { [weak self] in self?.assets = all }
+            DispatchQueue.main.async { [weak self] in self?.assets = all; self?.refreshHome() }
         }
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         searchBar.becomeFirstResponder()
+        refreshHome()
+    }
+
+    // MARK: 첫 화면 (순정: 최근 항목 사진 카드 + 추천 칩)
+
+    private let homeHeader = SearchHomeHeader()
+
+    private func refreshHome() {
+        guard showingRecent else { tableView.tableHeaderView = nil; return }
+        let recent = PhotoSearch.recent.prefix(6)
+        let folders = Library.shared.snapshot.folders
+        let current = assets
+        let suggestion = PhotoSearch.seasonSuggestion()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let cards: [(String, PHAsset?)] = recent.map { text in
+                let hit = PhotoSearch.search(text, assets: current, folders: folders).first
+                return (text, hit?.assets.last ?? hit.flatMap { $0.folderID }.flatMap { Library.shared.snapshot.cover($0) })
+            }
+            let hasSuggestion = !PhotoSearch.search(suggestion, assets: current, folders: []).isEmpty
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.showingRecent else { return }
+                self.homeHeader.configure(cards: cards, suggestions: hasSuggestion ? [suggestion] : [])
+                self.homeHeader.onPick = { [weak self] text in
+                    guard let self else { return }
+                    self.searchBar.text = text
+                    self.searchBar(self.searchBar, textDidChange: text)
+                }
+                self.homeHeader.onClear = { [weak self] in
+                    PhotoSearch.recent = []
+                    self?.refreshHome()
+                    self?.tableView.reloadData()
+                }
+                let width = self.tableView.bounds.width
+                self.homeHeader.frame = CGRect(x: 0, y: 0, width: width, height: self.homeHeader.preferredHeight)
+                self.tableView.tableHeaderView = self.homeHeader
+            }
+        }
     }
 
     private var showingRecent: Bool { (searchBar.text ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
 
     func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+        if searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+            refreshHome()
+        } else {
+            tableView.tableHeaderView = nil
+        }
         searchToken += 1
         let token = searchToken
         let folders = Library.shared.snapshot.folders
@@ -202,12 +270,12 @@ final class SearchViewController: UIViewController, UITableViewDataSource, UITab
     func numberOfSections(in tableView: UITableView) -> Int { 1 }
 
     func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        if showingRecent { return PhotoSearch.recent.isEmpty ? nil : "최근 검색" }
+        if showingRecent { return nil }
         return hits.isEmpty ? "결과 없음" : "결과"
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        showingRecent ? PhotoSearch.recent.count : hits.count
+        showingRecent ? 0 : hits.count
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -319,5 +387,108 @@ final class SearchResultsViewController: UIViewController, UICollectionViewDataS
                                           newestFirst: false, sourceAlbumID: nil)
         viewer.fallbackBounds = view.bounds
         navigationController?.pushViewController(viewer, animated: true)
+    }
+}
+
+/// 검색 첫 화면 머리: "최근 항목 [지우기]" + 사진 카드 줄 + 추천 칩
+final class SearchHomeHeader: UIView {
+    var onPick: ((String) -> Void)?
+    var onClear: (() -> Void)?
+    private let title = UILabel()
+    private let clear = UIButton(type: .system)
+    private let scroll = UIScrollView()
+    private let chips = UIStackView()
+    private var hasCards = false
+
+    var preferredHeight: CGFloat { (hasCards ? 44 + 132 : 0) + (chips.arrangedSubviews.isEmpty ? 0 : 60) + 8 }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        title.text = "최근 항목"
+        title.font = .systemFont(ofSize: 22, weight: .bold)
+        addSubview(title)
+        var config = UIButton.Configuration.gray()
+        config.title = "지우기"
+        config.cornerStyle = .capsule
+        config.buttonSize = .small
+        clear.configuration = config
+        clear.addAction(UIAction { [weak self] _ in self?.onClear?() }, for: .primaryActionTriggered)
+        addSubview(clear)
+        scroll.showsHorizontalScrollIndicator = false
+        addSubview(scroll)
+        chips.axis = .horizontal
+        chips.spacing = 8
+        addSubview(chips)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(cards: [(String, PHAsset?)], suggestions: [String]) {
+        scroll.subviews.forEach { $0.removeFromSuperview() }
+        hasCards = !cards.isEmpty
+        title.isHidden = !hasCards
+        clear.isHidden = !hasCards
+        var x: CGFloat = 16
+        for (text, asset) in cards {
+            let card = UIButton(type: .custom)
+            card.frame = CGRect(x: x, y: 0, width: 132, height: 132)
+            card.layer.cornerRadius = 16
+            card.layer.cornerCurve = .continuous
+            card.clipsToBounds = true
+            card.backgroundColor = .secondarySystemBackground
+            let image = UIImageView(frame: card.bounds)
+            image.contentMode = .scaleAspectFill
+            image.clipsToBounds = true
+            card.addSubview(image)
+            let shade = CAGradientLayer()
+            shade.frame = CGRect(x: 0, y: 72, width: 132, height: 60)
+            shade.colors = [UIColor.clear.cgColor, UIColor.black.withAlphaComponent(0.5).cgColor]
+            card.layer.addSublayer(shade)
+            let label = UILabel(frame: CGRect(x: 10, y: 100, width: 112, height: 22))
+            label.text = "‘\(text)’"
+            label.font = .systemFont(ofSize: 15, weight: .semibold)
+            label.textColor = .white
+            card.addSubview(label)
+            if let asset {
+                Thumbs.manager.requestImage(for: asset, targetSize: CGSize(width: 300, height: 300), contentMode: .aspectFill,
+                                            options: Thumbs.options) { result, _ in image.image = result }
+            }
+            card.addAction(UIAction { [weak self] _ in self?.onPick?(text) }, for: .primaryActionTriggered)
+            scroll.addSubview(card)
+            x += 140
+        }
+        scroll.contentSize = CGSize(width: x + 8, height: 132)
+        chips.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for text in suggestions {
+            var config = UIButton.Configuration.filled()
+            config.title = text
+            config.baseBackgroundColor = .secondarySystemBackground
+            config.baseForegroundColor = .label
+            config.cornerStyle = .capsule
+            let chip = UIButton(configuration: config)
+            chip.layer.shadowColor = UIColor.black.cgColor
+            chip.layer.shadowOpacity = 0.12
+            chip.layer.shadowRadius = 8
+            chip.layer.shadowOffset = CGSize(width: 0, height: 2)
+            chip.addAction(UIAction { [weak self] _ in self?.onPick?(text) }, for: .primaryActionTriggered)
+            chips.addArrangedSubview(chip)
+        }
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        var y: CGFloat = 0
+        if hasCards {
+            title.frame = CGRect(x: 16, y: 4, width: 200, height: 30)
+            clear.sizeToFit()
+            clear.frame = CGRect(x: bounds.width - 16 - clear.bounds.width, y: 4, width: clear.bounds.width, height: 30)
+            y = 44
+            scroll.frame = CGRect(x: 0, y: y, width: bounds.width, height: 132)
+            y += 132
+        }
+        chips.frame = CGRect(x: 16, y: y + 16, width: chips.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width, height: 36)
     }
 }
