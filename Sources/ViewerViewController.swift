@@ -1261,8 +1261,14 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         navigationController?.setBackSwipe(blocked: nil, by: self)
         // 떠날 때는 언제나 아래 탭 막대를 다시 보임 (닫힘·이 위에 앨범을 엶·코드로 탭을 바꿈 — showInLibrary).
         // 이 위에 다른 화면을 열었다 돌아오거나 닫기를 취소하면 viewWillAppear 가 다시 숨김
-        if #available(iOS 18.0, *) {
-            tabBarController?.setTabBarHidden(false, animated: animated)
+        if #available(iOS 18.0, *), let tabs = tabBarController {
+            if let coordinator = transitionCoordinator, coordinator.isInteractive, closesWithPhotoTransition(coordinator) {
+                // 끌어 닫기: 애니메이션으로 보이면 손가락 전환에 묶여 멈춘 채 남음(투명). 바로 보이게 하고 투명도는 전환이 손가락을 따라 바꿈
+                tabs.setTabBarHidden(false, animated: false)
+                tabs.tabBar.alpha = 0
+            } else {
+                tabs.setTabBarHidden(false, animated: animated)
+            }
         }
         guard isMovingFromParent else { return }
         navigationController?.setNavigationBarHidden(false, animated: animated)

@@ -181,6 +181,10 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         placeFlight(moved, cropped: false)
         let chrome = 1 - min(1, max(0, (down - 20) / 60))
         apply(backdrop: 1 - progress, chrome: chrome)
+        // 탭 막대는 보기 화면의 막대와 반대로 손가락을 따라 나타남 (순정처럼). 애니메이션 없이 바로
+        if let bar = tabBar {
+            UIView.performWithoutAnimation { bar.alpha = 1 - chrome }
+        }
         context.updateInteractiveTransition(progress)
     }
 
@@ -313,5 +317,31 @@ final class PhotoTransitionAnimator: NSObject, UIViewControllerAnimatedTransitio
         let context = self.context
         self.context = nil
         context?.completeTransition(completed)
+        settleBars(closed: completed)
+    }
+
+    /// 끌어 닫은 뒤 막대 정리. 손가락 전환 중에 시작된 막대 애니메이션(탭 막대 투명도, 내비게이션 막대 위치·크기)이
+    /// 끝나지 않고 멈춘 채 남는 일이 있어 지우고 다시 맞춤
+    private var tabBar: UITabBar? {
+        guard isInteractive, !opening else { return nil }
+        return grid?.tabBarController?.tabBar
+    }
+
+    private func settleBars(closed: Bool) {
+        guard let bar = tabBar else { return }
+        // 내비게이션 막대도 같은 일을 겪음 (위치·크기 애니메이션이 멈춘 채 남아 막대가 전환 중으로 남고 버튼이 안 눌림)
+        if let navigationBar = grid?.navigationController?.navigationBar {
+            navigationBar.layer.removeAllAnimations()
+        }
+        bar.layer.removeAnimation(forKey: "opacity")
+        if closed {
+            // 닫힘: 남은 만큼 짧게 나타남
+            UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+                bar.alpha = 1
+            }
+        } else {
+            // 취소: 보기 화면이 탭 막대를 다시 숨김. 다음에 보일 때 투명하지 않게 투명도만 되돌림
+            bar.alpha = 1
+        }
     }
 }
