@@ -579,6 +579,23 @@ final class MomentCell: UICollectionViewCell {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// 년·월 칸 그림 기억 (바꿀 때마다 다시 받지 않게)
+    static let images: NSCache<NSString, UIImage> = {
+        let c = NSCache<NSString, UIImage>()
+        c.countLimit = 600
+        return c
+    }()
+
+    /// 그 자리에서 선명한 그림 하나만 (흐린 그림 먼저 보내지 않음)
+    static let instant: PHImageRequestOptions = {
+        let o = PHImageRequestOptions()
+        o.isSynchronous = true
+        o.deliveryMode = .highQualityFormat
+        o.resizeMode = .fast
+        o.isNetworkAccessAllowed = false
+        return o
+    }()
+
     /// 지금 보이는 그림 (넘어가는 애니메이션이 이어 씀)
     var image: UIImage? { imageView.image }
 
@@ -597,11 +614,20 @@ final class MomentCell: UICollectionViewCell {
         let id = asset.localIdentifier
         guard assetID != id else { return }
         assetID = id
-        imageView.image = nil
         if requestID != PHInvalidImageRequestID { PHImageManager.default().cancelImageRequest(requestID) }
-        requestID = Thumbs.manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: Thumbs.options) { [weak self] image, _ in
-            guard let self, self.assetID == id, let image else { return }
-            self.imageView.image = image
+        requestID = PHInvalidImageRequestID
+        // 한 번 받은 그림은 기억해 바로 씀. 없으면 선명한 그림을 그 자리에서 받음
+        // (흐린 그림이 먼저 왔다가 선명한 그림으로 바뀌면 년·월로 바꿀 때 모든 칸이 깜빡여 보였음)
+        let key = "\(id)|\(Int(size.width))" as NSString
+        if let cached = Self.images.object(forKey: key) {
+            imageView.image = cached
+        } else {
+            var got: UIImage?
+            Thumbs.manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: Self.instant) { image, _ in
+                got = image
+            }
+            imageView.image = got
+            if let got { Self.images.setObject(got, forKey: key) }
         }
         setNeedsLayout()
     }

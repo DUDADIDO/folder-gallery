@@ -1180,8 +1180,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         var targetView: UIView?
         var targetRadius: CGFloat = 0
         if mode == .all {
+            instantThumbs = true
             reveal(assetID: anchor.id)
             collectionView.layoutIfNeeded()
+            instantThumbs = false
             if let path = indexPath(forAssetID: anchor.id), let cell = collectionView.cellForItem(at: path) {
                 target = cell.convert(cell.bounds, to: view)
                 targetView = cell.contentView
@@ -1251,6 +1253,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if mode == .all, moments != nil, usesNativeModeBar { customBarHold = true }
         modeBar.mode = mode
         if mode == .all {
+            instantThumbs = true
+            defer {
+                collectionView.layoutIfNeeded()
+                instantThumbs = false
+            }
             moments?.willMove(toParent: nil)
             moments?.view.removeFromSuperview()
             moments?.removeFromParent()
@@ -1827,6 +1834,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 년·월에서 전체로 막 돌아옴: 순정처럼 한 줄 막대를 그대로 두다가, 손으로 스크롤하면 시스템 탭 막대에 넘김
     private var customBarHold = false
+
+    /// 화면을 바꾸는 순간에만 칸 그림을 그 자리에서 받음
+    private var instantThumbs = false
 
     /// 한 화면에 다 들어와 스크롤할 수 없음 (탭 막대가 줄어들 일이 없음)
     private var shortContent: Bool {
@@ -2760,6 +2770,18 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             Thumbs.manager.cancelImageRequest(cell.requestID)
         }
         let size = thumbSize, compact = isDense
+        // 년·월에서 전체로 돌아오는 순간: 칸마다 선명한 그림을 그 자리에서 (흐림→선명으로 모든 칸이 깜빡이지 않게)
+        if instantThumbs {
+            var got: UIImage?
+            Thumbs.manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: MomentCell.instant) { image, _ in
+                got = image
+            }
+            if let got {
+                cell.requestID = PHInvalidImageRequestID
+                cell.imageView.image = got
+                return
+            }
+        }
         cell.requestID = Thumbs.manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill,
                                                      options: Thumbs.options) { [weak cell] image, info in
             let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
