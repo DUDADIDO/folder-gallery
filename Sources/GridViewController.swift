@@ -1160,7 +1160,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             guard let before else { return }
             _ = transform
             // 순정(녹화 비교): 앞 화면이 제자리에서 0.2초 동안 사라짐. 다 사라진 뒤에 치움
-            view.insertSubview(before, belowSubview: modeBar)
+            // 큰 제목 아래에 (위에 얹으면 제목이 바로 가려져 툭 사라져 보였음)
+            // 순서: 새 화면 → 앞 화면 그림 → 큰 제목 → 아래 막대 (새 화면이 위를 덮으면 겹치기 전에 툭 가려졌음)
+            view.insertSubview(before, aboveSubview: moments?.view ?? collectionView)
+            if titleOverlay.superview === view { view.insertSubview(titleOverlay, aboveSubview: before) }
+            view.bringSubviewToFront(modeBar)
             UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseInOut],
                            animations: { before.alpha = 0 }, completion: { _ in before.removeFromSuperview() })
         }
@@ -1260,7 +1264,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             moments?.removeFromParent()
             moments = nil
             titleOverlay.isHidden = false
-            navigationItem.rightBarButtonItems?.forEach { $0.isHidden = false }
+            fadeNavButtons(hidden: false)
             updateModeBar()
             onShown?()
             return
@@ -1288,7 +1292,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 self.titleOverlay.alpha = 1
             })
         }
-        navigationItem.rightBarButtonItems?.forEach { $0.isHidden = true }
+        fadeNavButtons(hidden: true)
         updateModeBar()
         let version = list.version
         if let fromGrid { child.view.alpha = 0 }
@@ -1377,6 +1381,33 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         return v
     }
 
+    /// 오른쪽 위 [필터][선택]을 0.2초 겹쳐 바꿈 (그냥 숨기면 탭 순간 툭 튐)
+    private func fadeNavButtons(hidden: Bool) {
+        guard let items = navigationItem.rightBarButtonItems, items.contains(where: { $0.isHidden != hidden }) else { return }
+        if hidden, let bar = navigationController?.navigationBar, let host = navigationController?.view, view.window != nil {
+            // 사라질 때: 지금 버튼 모습을 그림으로 얹고 통째로 흐려짐 (그냥 바꾸면 글자만 툭 빠지고 빈 동그라미가 남았음)
+            let format = UIGraphicsImageRendererFormat.preferred()
+            format.opaque = false
+            let image = UIGraphicsImageRenderer(bounds: bar.bounds, format: format).image { _ in
+                bar.drawHierarchy(in: bar.bounds, afterScreenUpdates: false)
+            }
+            let shot = UIImageView(image: image)
+            shot.frame = bar.convert(bar.bounds, to: host)
+            shot.isUserInteractionEnabled = false
+            host.addSubview(shot)
+            items.forEach { $0.isHidden = true }
+            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseInOut],
+                           animations: { shot.alpha = 0 }, completion: { _ in shot.removeFromSuperview() })
+        } else if let bar = navigationController?.navigationBar, view.window != nil {
+            UIView.transition(with: bar, duration: 0.2, options: [.transitionCrossDissolve, .allowUserInteraction]) {
+                items.forEach { $0.isHidden = hidden }
+                bar.layoutIfNeeded()
+            }
+        } else {
+            items.forEach { $0.isHidden = hidden }
+        }
+    }
+
     private struct GridTile { let id: String; let frame: CGRect; let image: UIImage?; let day: [Int] }
 
     /// 지금 화면에 보이는 격자 칸들 (사진 id, 화면 자리, 그림). 가운데 칸이 맨 앞
@@ -1402,6 +1433,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let gridShot = frozenImage(of: collectionView)
         if let gridShot {
             view.insertSubview(gridShot, aboveSubview: child.view)
+            // 큰 제목은 그림 위에 두고 같이 서서히 사라짐
+            if titleOverlay.superview === view { view.bringSubviewToFront(titleOverlay); view.bringSubviewToFront(modeBar) }
         }
         // 막대가 바뀌며 생긴 여백 변화까지 먼저 다 반영 (안 그러면 날아갈 자리를 잰 뒤 월 화면이 몇 pt 움직여 착지가 어긋남)
         view.layoutIfNeeded()
