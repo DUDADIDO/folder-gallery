@@ -1061,10 +1061,18 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if isPinching { return }
         // 고르는 중에는 둘 다 숨기고 선택 막대만 (순정)
         let show = modeBarVisible && !selecting
+        modeBar.segmentsOnly = traitCollection.isWide
+        // 아이폰에서 막대 ↔ 탭 막대가 서로 바뀔 때는 순정처럼 모양이 이어지게 (사진 아이콘 동그라미가 늘고 줄며)
+        if !traitCollection.isWide, !selecting, view.window != nil, !morphing, #available(iOS 18.0, *),
+           let tabs = tabBarController, navigationController?.topViewController === self,
+           modeBar.isHidden == show, tabs.isTabBarHidden != show {
+            if show { morphFromTabs(tabs) } else { morphToTabs(tabs) }
+            return
+        }
+        if morphing { return }
         if modeBar.isHidden == show {
             modeBar.isHidden = !show
         }
-        modeBar.segmentsOnly = traitCollection.isWide
         // 탭 막대는 늘 막대와 반대로 (다른 곳에서 탭 막대를 다시 보이게 해도 맞춤). 아이패드는 탭 막대가 위라 그대로
         let hideTabs = traitCollection.isWide ? selecting : (show || selecting)
         if #available(iOS 18.0, *), let tabs = tabBarController,
@@ -1072,9 +1080,15 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             tabs.setTabBarHidden(hideTabs, animated: true)
             if isRoot { layoutTitleOverlay() }
         }
-        if show {
+        if show { layoutModeBarFrame() }
+    }
+
+    private func layoutModeBarFrame() {
+        do {
             let height: CGFloat = 56
-            let bottom = view.bounds.height - max(view.safeAreaInsets.bottom, 20) - 4
+            // 탭 막대가 떠 있든 아니든 같은 자리 (탭 막대 → 막대로 바뀌는 중에 막대가 위로 떠 있지 않게): 창의 아래 여백 기준
+            let safeBottom = view.window?.safeAreaInsets.bottom ?? view.safeAreaInsets.bottom
+            let bottom = view.bounds.height - max(safeBottom, 20) - 4
             let wide = traitCollection.isWide
             // 아이패드: 사이드바를 뺀 내용 자리 가운데
             let left = wide ? view.safeAreaInsets.left : 0
@@ -1181,6 +1195,83 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 사진 아이콘을 눌러 탭 막대를 불러낸 상태 (다음 손 스크롤까지)
     private var tabsRequested = false
+
+    /// 막대 ↔ 탭 막대 모양이 바뀌는 중
+    private var morphing = false
+
+    /// 탭 막대의 왼쪽 캡슐(보관함·앨범·미분류)과 오른쪽 검색 동그라미 자리를 막대 좌표로.
+    /// 시스템 탭 막대 안을 훑어 모양으로 찾음. 못 찾으면 막대 자리를 조금 키운 것
+    @available(iOS 18.0, *)
+    private func tabShapes(_ tabs: UITabBarController) -> (capsule: CGRect, search: CGRect?) {
+        let bar = tabs.tabBar
+        var best: CGRect?
+        var round: CGRect?
+        func scan(_ v: UIView, _ depth: Int) {
+            guard depth < 6 else { return }
+            for s in v.subviews where !s.isHidden && s.alpha > 0.01 {
+                let f = s.convert(s.bounds, to: modeBar)
+                if f.height >= 44, f.height <= 80 {
+                    if f.width > f.height * 2.5, f.width < bar.bounds.width - 40 {
+                        if best == nil || f.width > best!.width { best = f }
+                    } else if abs(f.width - f.height) < 2, f.minX > bar.bounds.width / 2 - modeBar.frame.minX {
+                        if round == nil || f.width > round!.width { round = f }
+                    }
+                }
+                scan(s, depth + 1)
+            }
+        }
+        scan(bar, 0)
+        let h = modeBar.bounds.height
+        return (best ?? CGRect(x: 4, y: -3, width: modeBar.bounds.width - h - 20, height: h + 6), round)
+    }
+
+    @available(iOS 18.0, *)
+    private func morphToTabs(_ tabs: UITabBarController) {
+        morphing = true
+        // 탭 막대를 투명하게 미리 놓아 캡슐 자리를 잼
+        tabs.setTabBarHidden(false, animated: false)
+        tabs.tabBar.alpha = 0
+        tabs.tabBar.layoutIfNeeded()
+        let shapes = tabShapes(tabs)
+        modeBar.morphToTabs(target: shapes.capsule, searchTarget: shapes.search, swap: { [weak self] in
+            // 거의 같은 자리·모양이 됐을 때 진짜 탭 막대로 겹쳐 바꿈
+            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut]) {
+                tabs.tabBar.alpha = 1
+                self?.modeBar.alpha = 0
+            }
+        }, done: { [weak self] in
+            guard let self else { return }
+            tabs.tabBar.alpha = 1
+            self.modeBar.isHidden = true
+            self.modeBar.alpha = 1
+            self.modeBar.endMorph()
+            self.modeBar.setNeedsLayout()
+            self.morphing = false
+            if self.isRoot { self.layoutTitleOverlay() }
+            self.updateModeBar()
+        })
+    }
+
+    @available(iOS 18.0, *)
+    private func morphFromTabs(_ tabs: UITabBarController) {
+        morphing = true
+        modeBar.isHidden = false
+        layoutModeBarFrame()
+        modeBar.layoutIfNeeded()
+        let shapes = tabShapes(tabs)
+        modeBar.morphFromTabs(from: shapes.capsule, searchFrom: shapes.search)
+        // 진짜 탭 막대는 곧바로 빼고 (같은 모양의 동그라미가 그 자리에서 줄어듦)
+        UIView.animate(withDuration: 0.1, animations: { tabs.tabBar.alpha = 0 }, completion: { _ in
+            tabs.setTabBarHidden(true, animated: false)
+            tabs.tabBar.alpha = 1
+        })
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) { [weak self] in
+            guard let self else { return }
+            self.morphing = false
+            if self.isRoot { self.layoutTitleOverlay() }
+            self.updateModeBar()
+        }
+    }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         guard tabsRequested else { return }
