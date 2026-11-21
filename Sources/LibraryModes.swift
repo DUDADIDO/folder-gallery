@@ -284,6 +284,11 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
         }
     }
 
+    /// 이 화면을 띄운 뒤 손으로 스크롤했는지 (안 했으면 전체로 돌아갈 때 보던 자리 그대로 — 순정)
+    private(set) var userScrolled = false
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { userScrolled = true }
+
     /// 화면 가운데에 가장 가까운 카드 (년·월 어느 쪽이든)
     func centerCard() -> (id: String, frame: CGRect, cell: MomentCell)? {
         guard isViewLoaded else { return nil }
@@ -380,6 +385,7 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
     func show(_ data: MomentsData, mode: LibraryMode, scrollToMonth: Int? = nil) {
         self.data = data
         self.mode = mode
+        userScrolled = false
         loadViewIfNeeded()
         collectionView.setCollectionViewLayout(makeLayout(), animated: false)
         collectionView.reloadData()
@@ -427,21 +433,21 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
                 // 연도 카드: 거의 화면 너비, 가로로 조금 긴 비율, 카드 사이 넓게
                 let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .fractionalHeight(1)))
                 let group = NSCollectionLayoutGroup.vertical(layoutSize: .init(widthDimension: .fractionalWidth(1),
-                                                                              heightDimension: .absolute(((width - 24) * 0.68).rounded())),
+                                                                              heightDimension: .absolute(((width - 40) * 0.743).rounded())),
                                                              subitems: [item])
                 let layout = NSCollectionLayoutSection(group: group)
-                layout.interGroupSpacing = 20
-                layout.contentInsets = NSDirectionalEdgeInsets(top: 16, leading: 12, bottom: 16, trailing: 12)
+                layout.interGroupSpacing = 24
+                layout.contentInsets = NSDirectionalEdgeInsets(top: 16, leading: 20, bottom: 16, trailing: 20)
                 return layout
             }
             // 월 (순정 iOS 27 녹화와 비교): 달마다 배치가 다름
             // 하루: 가로로 긴 큰 카드 하나 / 이틀: 반반 / 사흘 이상: 짝수 달은 가로로 긴 큰 카드 + 3칸 줄,
             // 홀수 달은 왼쪽 작은 두 칸 + 오른쪽 2×2, 그 뒤로 3칸 줄
-            let gap: CGFloat = 4
-            let inset: CGFloat = 12
+            let gap: CGFloat = 6
+            let inset: CGFloat = 20
             let full = width - inset * 2
             let side = floor((full - gap * 2) / 3)
-            let wideHeight = (full * 0.62).rounded()
+            let wideHeight = (full * 0.66).rounded()
             let count = self?.data.months.indices.contains(section) == true ? self!.data.months[section].days.count : 0
             var groups: [NSCollectionLayoutGroup] = []
             func item(_ w: CGFloat, _ h: CGFloat) -> NSCollectionLayoutItem {
@@ -481,7 +487,7 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
                                                          subitems: groups.isEmpty ? [NSCollectionLayoutItem(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .absolute(1)))] : groups)
             whole.interItemSpacing = .fixed(gap)
             let layout = NSCollectionLayoutSection(group: whole)
-            layout.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: inset, bottom: 28, trailing: inset)
+            layout.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: inset, bottom: 22, trailing: inset)
             let header = NSCollectionLayoutBoundarySupplementaryItem(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .absolute(44)),
                                                                      elementKind: UICollectionView.elementKindSectionHeader, alignment: .top)
             layout.boundarySupplementaryItems = [header]
@@ -502,7 +508,7 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
         let scale = traitCollection.displayScale
         if mode == .years {
             let year = data.years[indexPath.item]
-            cell.configure(asset: year.cover, title: "\(year.year)년", subtitle: "\(year.coverMonth)월", large: true,
+            cell.configure(asset: year.cover, title: "\(year.year)년", subtitle: nil, large: true,
                            size: CGSize(width: collectionView.bounds.width * scale, height: collectionView.bounds.width * 0.7 * scale))
         } else {
             let day = data.months[indexPath.section].days[indexPath.item]
@@ -606,7 +612,7 @@ final class MomentCell: UICollectionViewCell {
 
     func configure(asset: PHAsset, title: String, subtitle: String?, large: Bool, size: CGSize) {
         titleLabel.text = title
-        titleLabel.font = .systemFont(ofSize: large ? 22 : 13, weight: .bold)
+        titleLabel.font = .systemFont(ofSize: large ? 22 : 15, weight: .bold)
         subtitleLabel.text = subtitle
         subtitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         subtitleLabel.isHidden = subtitle == nil
@@ -640,7 +646,7 @@ final class MomentCell: UICollectionViewCell {
         shade.frame = CGRect(x: 0, y: 0, width: contentView.bounds.width, height: min(90, contentView.bounds.height * 0.5))
         CATransaction.commit()
         let large = contentView.layer.cornerRadius > 20
-        let pad: CGFloat = large ? 18 : 7
+        let pad: CGFloat = large ? 20 : 10
         titleLabel.sizeToFit()
         titleLabel.frame.origin = CGPoint(x: pad, y: pad - (large ? 2 : 3))
         subtitleLabel.sizeToFit()
@@ -654,7 +660,7 @@ final class MonthHeaderView: UICollectionReusableView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        label.font = .systemFont(ofSize: 17, weight: .bold)
+        label.font = .systemFont(ofSize: 22, weight: .bold)
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([

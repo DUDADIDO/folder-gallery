@@ -1131,6 +1131,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 막대 표시는 누르는 순간 이미 바뀌어 있음 → 지금 보이는 화면으로 비교
         let current: LibraryMode = moments?.mode ?? .all
         guard mode != current else { return }
+        // 순정: 년·월에서 스크롤하지 않고 전체로 돌아오면 떠날 때 보던 자리 그대로
+        if current == .all { savedGridOffset = collectionView.contentOffset }
+        restoreGridOffset = (mode == .all && moments?.userScrolled == false) ? savedGridOffset : nil
         // 전체 → 월은 보이던 사진들이 날 칸으로 빨려 들어가는 전용 전환
         if moments == nil && mode == .months { setLibraryMode(.months); return }
         // 지금 화면 가운데 사진
@@ -1164,17 +1167,17 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         //  월 ↔ 전체: 가운데 카드 사진 한 장이 격자 칸 ↔ 카드로 줄고 커지며 날아가고, 나머지는 0.2초 겹쳐 바뀜
         //  년이 끼면: 화면 전체가 그 해 카드 쪽으로 줄어들거나(→년) 카드에서 커져 나옴(년→), 0.35초
         let zoomScreen = mode == .years || old == .years
-        let duration: TimeInterval = 0.35
+        let duration: TimeInterval = 0.4   // 순정: 전환마다 23~24프레임
         func fadeBefore(to transform: CGAffineTransform) {
             guard let before else { return }
             // 순서: 새 화면 → 앞 화면 그림 → 큰 제목 → 아래 막대
             view.insertSubview(before, aboveSubview: moments?.view ?? collectionView)
             if titleOverlay.superview === view { view.insertSubview(titleOverlay, aboveSubview: before) }
             view.bringSubviewToFront(modeBar)
-            let move = UIViewPropertyAnimator(duration: duration, dampingRatio: 1) { before.transform = transform }
-            move.addCompletion { _ in before.removeFromSuperview() }
-            move.startAnimation()
-            UIView.animate(withDuration: zoomScreen ? 0.25 : 0.2, delay: 0, options: [.curveEaseInOut]) { before.alpha = 0 }
+            _ = transform
+            // 다 사라진 뒤에 치움 (바뀌는 값이 없는 애니메이션은 바로 끝나서, 거기에 치우기를 걸면 겹치기 전에 사라졌음)
+            UIView.animate(withDuration: 0.38, delay: 0, options: [.curveEaseInOut],
+                           animations: { before.alpha = 0 }, completion: { _ in before.removeFromSuperview() })
         }
         if mode == .all {
             titleOverlay.alpha = 0
@@ -1192,7 +1195,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         var targetRadius: CGFloat = 0
         if mode == .all {
             instantThumbs = true
-            reveal(assetID: anchor.id)
+            if let offset = restoreGridOffset {
+                collectionView.layoutIfNeeded()
+                collectionView.setContentOffset(offset, animated: false)
+            } else {
+                reveal(assetID: anchor.id)
+            }
             collectionView.layoutIfNeeded()
             instantThumbs = false
             if let path = indexPath(forAssetID: anchor.id), let cell = collectionView.cellForItem(at: path) {
@@ -1216,11 +1224,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 .scaledBy(x: s, y: s)
         }
         if zoomScreen {
-            // 앞 화면은 그 사진이 새 자리로 가도록 줄거나 커지며 사라지고, 새 화면은 반대 모양에서 제자리로 (선명한 채로)
-            fadeBefore(to: mapping(from: anchor.frame, to: target))
+            // 순정(프레임 확대 비교): 전체 ↔ 년은 제자리에서 겹쳐 바뀜. 월 ↔ 년은 새 카드들이 살짝 모였다가 펴짐
+            _ = mapping
+            fadeBefore(to: .identity)
             let content: UIView? = mode == .all ? collectionView : moments?.view
-            if let content {
-                content.transform = mapping(from: target, to: anchor.frame)
+            if let content, mode != .all, old != .all {
+                let k: CGFloat = 0.93
+                content.transform = CGAffineTransform(translationX: (1 - k) * (target.midX - c.x), y: (1 - k) * (target.midY - c.y)).scaledBy(x: k, y: k)
                 let anim = UIViewPropertyAnimator(duration: duration, dampingRatio: 1) { content.transform = .identity }
                 anim.startAnimation()
             }
@@ -1473,10 +1483,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // (둘 다 반투명이면 흰 바탕이 비쳐 칸이 모두 깜빡였음)
         child.view.alpha = 1
         if let gridShot {
-            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseInOut], animations: { gridShot.alpha = 0 },
+            UIView.animate(withDuration: 0.38, delay: 0, options: [.curveEaseInOut], animations: { gridShot.alpha = 0 },
                            completion: { _ in gridShot.removeFromSuperview() })
         }
-        let anim = UIViewPropertyAnimator(duration: 0.22, dampingRatio: 1) {
+        let anim = UIViewPropertyAnimator(duration: 0.4, dampingRatio: 1) {
             for (flyer, target, cell) in flights {
                 flyer.frame = target
                 flyer.layer.cornerRadius = cell.contentView.layer.cornerRadius
@@ -1872,6 +1882,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 월 보기에서 마지막으로 보던 카드 사진 (년 → 월로 돌아올 때 그 달로)
     private var lastMonthAnchorID: String?
+
+    /// 전체를 떠날 때의 스크롤 자리, 그리고 이번에 그 자리로 돌아갈지
+    private var savedGridOffset: CGPoint?
+    private var restoreGridOffset: CGPoint?
 
     /// 한 화면에 다 들어와 스크롤할 수 없음 (탭 막대가 줄어들 일이 없음)
     private var shortContent: Bool {
