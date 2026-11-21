@@ -1146,7 +1146,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 앞 화면을 그대로 찍음 (숨기고 찍으면 그 한 프레임이 실제 화면에 비어 보였음).
         // 찍힌 그 사진은 날아가는 사진과 같은 길로 커지며 빨리 사라져 두 장으로 보이지 않음
         _ = anchorContent
-        let before = view.snapshotView(afterScreenUpdates: false)
+        // 사진 칸들만 찍음 (화면 전체를 찍으면 아래 막대·큰 제목까지 같이 커져 두 겹으로 보였음)
+        let beforeSource: UIView = moments?.view ?? collectionView
+        let before = beforeSource.snapshotView(afterScreenUpdates: false)
+        before?.frame = beforeSource.frame
         setLibraryMode(mode) { [weak self] in
             guard let self else { return }
             self.morphAnchor(anchor, before: before, to: mode)
@@ -1156,8 +1159,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func morphAnchor(_ anchor: (id: String, frame: CGRect, image: UIImage?, radius: CGFloat)?, before: UIView?, to mode: LibraryMode) {
         func fadeBefore(to transform: CGAffineTransform) {
             guard let before else { return }
-            before.frame = view.bounds
-            view.insertSubview(before, belowSubview: modeBar)
+            // 제목·막대보다 아래, 새 화면보다 위
+            view.insertSubview(before, aboveSubview: moments?.view ?? collectionView)
             let anim = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
                 before.transform = transform
             }
@@ -1196,9 +1199,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 화면 전체가 그 사진을 따라 커지고 작아짐 (순정): 앞 화면은 사진이 새 자리로 가도록 움직이며 사라지고,
         // 새 화면은 사진이 앞 자리에 있던 모양에서 제자리로 오며 나타남
         let c = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        // 화면 전체는 살짝만 (0.8~1.25배, 이동도 일부만). 끝까지 가는 건 날아가는 사진 한 장 (순정)
         func mapping(from a: CGRect, to b: CGRect) -> CGAffineTransform {
-            let s = b.width / max(1, a.width)
-            let tx = b.midX - c.x - s * (a.midX - c.x), ty = b.midY - c.y - s * (a.midY - c.y)
+            let s = min(1.25, max(0.8, b.width / max(1, a.width)))
+            let tx = (b.midX - c.x - s * (a.midX - c.x)) * 0.35, ty = (b.midY - c.y - s * (a.midY - c.y)) * 0.35
             return CGAffineTransform(translationX: tx, y: ty).scaledBy(x: s, y: s)
         }
         fadeBefore(to: mapping(from: anchor.frame, to: target))
@@ -1378,9 +1382,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 나머지는 0.3초 동안 겹쳐 바뀜
     private func suckIntoMonths(_ child: MomentsViewController, _ tiles: [GridTile]) {
         // 지금 보이는 격자를 사진으로 찍어 새 화면 위에 얹음
-        let gridShot = view.snapshotView(afterScreenUpdates: false)
+        let gridShot = collectionView.snapshotView(afterScreenUpdates: false)
         if let gridShot {
-            gridShot.frame = view.bounds
+            gridShot.frame = collectionView.frame
             view.insertSubview(gridShot, aboveSubview: child.view)
         }
         // 막대가 바뀌며 생긴 여백 변화까지 먼저 다 반영 (안 그러면 날아갈 자리를 잰 뒤 월 화면이 몇 pt 움직여 착지가 어긋남)
@@ -1414,8 +1418,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if let center = tiles.first, let landing = flights.first(where: { $0.0.frame == center.frame }) ?? flights.first {
             let c = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
             func mapping(from a: CGRect, to b: CGRect) -> CGAffineTransform {
-                let s = b.width / max(1, a.width)
-                return CGAffineTransform(translationX: b.midX - c.x - s * (a.midX - c.x), y: b.midY - c.y - s * (a.midY - c.y)).scaledBy(x: s, y: s)
+                let s = min(1.25, max(0.8, b.width / max(1, a.width)))
+                return CGAffineTransform(translationX: (b.midX - c.x - s * (a.midX - c.x)) * 0.35,
+                                         y: (b.midY - c.y - s * (a.midY - c.y)) * 0.35).scaledBy(x: s, y: s)
             }
             let from = landing.0.frame, to = landing.1
             child.view.transform = mapping(from: to, to: from)
