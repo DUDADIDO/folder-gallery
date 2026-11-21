@@ -801,6 +801,24 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         let sameShape = !force && newSignature == lastSignature
         groups = newGroups
         lastSignature = newSignature
+        // 숨긴 앨범·폴더 안이 비면 가운데에 안내 (제목 없는 칸이라 머리글 안내가 안 보임)
+        if mode != .top, snapshot.loaded, messageView.isHidden, newGroups.allSatisfy({ $0.folders.isEmpty }) {
+            let empty = UILabel()
+            empty.text = mode == .hidden ? "숨긴 앨범이 없어요" : "비어 있어요"
+            empty.textColor = .secondaryLabel
+            empty.font = .systemFont(ofSize: 17)
+            empty.textAlignment = .center
+            empty.translatesAutoresizingMaskIntoConstraints = false
+            let holder = UIView()
+            holder.addSubview(empty)
+            NSLayoutConstraint.activate([
+                empty.centerXAnchor.constraint(equalTo: holder.safeAreaLayoutGuide.centerXAnchor),
+                empty.centerYAnchor.constraint(equalTo: holder.safeAreaLayoutGuide.centerYAnchor),
+            ])
+            collectionView.backgroundView = holder
+        } else {
+            collectionView.backgroundView = nil
+        }
         if sameShape {
             refreshVisibleText()
         } else {
@@ -1075,7 +1093,7 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         }
         Prefs.hiddenAlbums = hidden
         NotificationCenter.default.post(name: Library.didChange, object: nil)
-        toast(on ? "'\(folder.title)' 을(를) 숨겼어요. '숨긴 앨범' 탭에서 볼 수 있어요" : "'\(folder.title)' 을(를) 다시 보이게 했어요")
+        toast(on ? "'\(folder.title)' 을(를) 숨겼어요. 앨범 ⋯ 메뉴의 '숨긴 앨범'에서 볼 수 있어요" : "'\(folder.title)' 을(를) 다시 보이게 했어요")
     }
 
     /// 앨범은 iOS 가 직접 묻는 확인창 하나만 (순정처럼 한 번). 폴더는 안의 앨범까지 지워지니 먼저 알려 줌

@@ -1038,6 +1038,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if #available(iOS 18.0, *), let tabs = tabBarController,
            navigationController?.topViewController === self, tabs.isTabBarHidden != hideTabs {
             tabs.setTabBarHidden(hideTabs, animated: true)
+            if isRoot { layoutTitleOverlay() }
         }
         if show {
             let height: CGFloat = 56
@@ -1177,7 +1178,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             ?? CGRect(x: 0, y: view.safeAreaInsets.top, width: view.bounds.width, height: 54)
         titleOverlay.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: barFrame.maxY + 46)
         titleOverlay.titleCenterY = barFrame.midY
-        titleOverlay.leading = view.safeAreaInsets.left + 20
+        // 아이패드: 탭 막대가 숨고(선택 중) 사이드바도 닫히면 사이드바 버튼이 왼쪽 위에 혼자 뜸. 제목을 그 옆으로
+        var buttonRoom: CGFloat = 0
+        if #available(iOS 18.0, *), traitCollection.userInterfaceIdiom == .pad,
+           let tabs = tabBarController, tabs.mode == .tabSidebar, tabs.isTabBarHidden, tabs.sidebar.isHidden {
+            buttonRoom = 56
+        }
+        titleOverlay.leading = view.safeAreaInsets.left + 20 + buttonRoom
         updateTitleOverlay()
     }
 

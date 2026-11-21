@@ -1292,6 +1292,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             // 아이패드: 보는 동안 사이드바도 접음 (순정). 떠날 때 원래대로
             if let tabs = tabBarController, !tabs.sidebar.isHidden {
                 hidSidebar = true
+                hidSidebarWidth = tabs.view.bounds.width
                 tabs.sidebar.isHidden = true
             }
         }
@@ -1330,7 +1331,8 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         if #available(iOS 18.0, *), let tabs = tabBarController {
             if hidSidebar {
                 hidSidebar = false
-                tabs.sidebar.isHidden = false
+                // 보는 중에 돌렸으면(가로→세로) 펴지 않음. 세로에서는 순정도 사이드바를 닫아 둠
+                if abs(tabs.view.bounds.width - hidSidebarWidth) < 1 { tabs.sidebar.isHidden = false }
             }
             if let coordinator = transitionCoordinator, coordinator.isInteractive, closesWithPhotoTransition(coordinator) {
                 // 끌어 닫기: 애니메이션으로 보이면 손가락 전환에 묶여 멈춘 채 남음(투명). 바로 보이게 하고 투명도는 전환이 손가락을 따라 바꿈
@@ -1399,6 +1401,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
     private lazy var moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeMoreMenu())
     /// 보는 동안 우리가 접은 사이드바 (떠날 때 다시 폄)
     private var hidSidebar = false
+    private var hidSidebarWidth: CGFloat = 0
     private var usesTopBar = false
 
     private func applyBarPlacement() {

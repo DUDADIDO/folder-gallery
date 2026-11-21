@@ -87,8 +87,8 @@ final class SorterViewController: UIViewController {
         let guide = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
             imageView.topAnchor.constraint(equalTo: guide.topAnchor, constant: 8),
-            imageView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            imageView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            imageView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            imageView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
             imageView.bottomAnchor.constraint(equalTo: chipScroll.topAnchor, constant: -12),
 
             videoBadge.topAnchor.constraint(equalTo: imageView.topAnchor, constant: 10),
@@ -99,8 +99,8 @@ final class SorterViewController: UIViewController {
             doneLabel.centerYAnchor.constraint(equalTo: imageView.centerYAnchor),
             doneLabel.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 32),
 
-            chipScroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            chipScroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            chipScroll.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            chipScroll.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
             chipScroll.heightAnchor.constraint(equalToConstant: 44),
             chipScroll.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -8),
 
@@ -110,8 +110,8 @@ final class SorterViewController: UIViewController {
             chipStack.trailingAnchor.constraint(equalTo: chipScroll.contentLayoutGuide.trailingAnchor, constant: -16),
             chipStack.heightAnchor.constraint(equalTo: chipScroll.frameLayoutGuide.heightAnchor),
 
-            buttons.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            buttons.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
+            buttons.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 8),
+            buttons.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -8),
             buttons.heightAnchor.constraint(equalToConstant: 56),
             buttons.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -4),
         ])
