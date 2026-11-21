@@ -159,6 +159,16 @@ final class LibraryModeBar: UIView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// 아이패드: 보관함·검색 단추 없이 [년 | 월 | 모든 사진]만 (순정)
+    var segmentsOnly = false {
+        didSet {
+            libraryButton.isHidden = segmentsOnly
+            searchButton.isHidden = segmentsOnly
+            segments.setTitle(segmentsOnly ? "모든 사진" : "전체", forSegmentAt: LibraryMode.all.rawValue)
+            setNeedsLayout()
+        }
+    }
+
     var mode: LibraryMode {
         get { LibraryMode(rawValue: segments.selectedSegmentIndex) ?? .all }
         set { segments.selectedSegmentIndex = newValue.rawValue }
@@ -168,6 +178,12 @@ final class LibraryModeBar: UIView {
         super.layoutSubviews()
         // 순정 배치: 왼쪽 큰 캡슐(보관함 아이콘 + 년|월|전체), 오른쪽 둥근 검색
         let height = bounds.height
+        if segmentsOnly {
+            capsule.frame = bounds
+            capsule.layer.cornerRadius = height / 2
+            segments.frame = CGRect(x: 8, y: 8, width: bounds.width - 16, height: height - 16)
+            return
+        }
         searchButton.frame = CGRect(x: bounds.width - height, y: 0, width: height, height: height)
         let capsuleWidth = bounds.width - height - 12
         capsule.frame = CGRect(x: 0, y: 0, width: capsuleWidth, height: height)

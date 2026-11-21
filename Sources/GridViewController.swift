@@ -287,7 +287,12 @@ final class PhotoGridLayout: UICollectionViewLayout {
 
     static func isCompact(_ columns: Int) -> Bool { columns >= compactColumns }
     /// 앨범 표지 높이 ÷ 화면 너비 (순정 iOS 27 앨범 화면: iPhone 14 Pro 393pt 너비에 약 480pt)
-    static let coverRatio: CGFloat = 1.22
+    static let phoneCoverRatio: CGFloat = 1.22
+    /// 표지 높이 ÷ 너비. 아이패드처럼 넓으면 화면을 다 덮지 않게 낮게
+    static func coverRatio(width: CGFloat) -> CGFloat {
+        // 아이패드 가로(넓음)에서는 높이를 세로일 때쯤(약 520pt)으로 묶음. 안 묶으면 화면을 거의 다 덮음
+        width > 600 ? min(0.62, 520 / width) : phoneCoverRatio
+    }
     /// 칸 크기를 바꾸는 중인 상태: columns 배치의 사진 줄(높이·사이)을 scale 배로. 머리글 높이는 그대로
     struct Zoom {
         /// 그리는 배치의 칸 수
@@ -355,11 +360,18 @@ final class PhotoGridLayout: UICollectionViewLayout {
     }
 
     /// 사진이 놓이는 너비와 왼쪽 시작. 순정 iOS 27 은 가로 화면에서도 사진이 양끝까지 꽉 참 (노치 쪽도)
-    private var width: CGFloat {
-        collectionView?.bounds.width ?? 0
+    /// 아이패드는 떠 있는 사이드바만큼(안전 영역 왼쪽·오른쪽) 비켜 놓음 (순정: 사진이 사이드바 밑에 깔리지 않음)
+    private var sideInsets: (left: CGFloat, right: CGFloat) {
+        guard let view = collectionView, view.traitCollection.userInterfaceIdiom == .pad else { return (0, 0) }
+        return (view.safeAreaInsets.left, view.safeAreaInsets.right)
     }
 
-    private var originX: CGFloat { 0 }
+    private var width: CGFloat {
+        let insets = sideInsets
+        return max(1, (collectionView?.bounds.width ?? 0) - insets.left - insets.right)
+    }
+
+    private var originX: CGFloat { sideInsets.left }
 
     private func geometry(_ columns: Int) -> Geometry {
         let width = self.width
@@ -375,7 +387,7 @@ final class PhotoGridLayout: UICollectionViewLayout {
         // 칸 너비는 나눈 값 그대로 (내림하면 25칸에서 오른쪽에 20pt 가까이 빔). 자리는 itemFrame 에서 화소에 맞춤
         let side = perRow == 1 ? width : max(PhotoGridLayout.isCompact(perRow) ? 8 : 20,
                                              (width - spacing * CGFloat(perRow - 1)) / CGFloat(perRow))
-        let header = headerHeight ?? (width * PhotoGridLayout.coverRatio).rounded()
+        let header = headerHeight ?? (width * PhotoGridLayout.coverRatio(width: width)).rounded()
         var geometry = Geometry(columns: perRow, x: originX, width: width, side: side, header: header, spacing: spacing)
         geometry.tops.reserveCapacity(counts.count + 1)
         var y: CGFloat = 0
@@ -431,7 +443,7 @@ final class PhotoGridLayout: UICollectionViewLayout {
     /// 앨범 표지의 높이 (맨 위 묶음의 머리글. 칸 크기를 바꿔도 그대로). 날짜 머리글이면 nil
     var coverHeight: CGFloat? {
         guard headerHeight == nil, !counts.isEmpty else { return nil }
-        return (width * PhotoGridLayout.coverRatio).rounded()
+        return (width * PhotoGridLayout.coverRatio(width: width)).rounded()
     }
 
     /// 사진 줄을 scale 배로 했을 때 묶음 section 의 맨 위 (머리글은 그대로). section 이 묶음 수면 전체 높이
@@ -765,7 +777,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if isRoot && saved == 7 { saved = 5 }   // 예전의 7칸·25칸은 순정 칸 수로
         if isRoot && saved == 25 { saved = PhotoGridLayout.denseColumns }
         // 순정 iOS 27 은 보관함·앨범 모두 3칸이 기본
-        columns = levels.contains(saved) ? saved : 3
+        // 처음엔 아이폰 3칸, 아이패드 5칸 (순정)
+        columns = levels.contains(saved) ? saved : (UIDevice.current.userInterfaceIdiom == .pad ? 5 : 3)
     }
 
     required init?(coder: NSCoder) {
@@ -889,6 +902,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         guard folder.id == "all", !selecting, collectionView != nil else { return false }
         if moments != nil { return true }
         guard !list.isEmpty else { return false }
+        // 아이패드는 늘 아래 가운데에 (탭 막대가 위에 있어서 서로 비킬 필요 없음)
+        if traitCollection.isWide { return true }
         // 한 화면에 다 들어와 스크롤할 수 없으면 끝까지 오므렸을 때 늘 보이게 (안 그러면 년·월로 갈 길이 없음)
         if PhotoGridLayout.isCompact(columns),
            collectionView.contentSize.height <= collectionView.bounds.height - collectionView.adjustedContentInset.bottom { return true }
@@ -1017,8 +1032,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if modeBar.isHidden == show {
             modeBar.isHidden = !show
         }
-        // 탭 막대는 늘 막대와 반대로 (다른 곳에서 탭 막대를 다시 보이게 해도 맞춤)
-        let hideTabs = show || selecting
+        modeBar.segmentsOnly = traitCollection.isWide
+        // 탭 막대는 늘 막대와 반대로 (다른 곳에서 탭 막대를 다시 보이게 해도 맞춤). 아이패드는 탭 막대가 위라 그대로
+        let hideTabs = traitCollection.isWide ? selecting : (show || selecting)
         if #available(iOS 18.0, *), let tabs = tabBarController,
            navigationController?.topViewController === self, tabs.isTabBarHidden != hideTabs {
             tabs.setTabBarHidden(hideTabs, animated: true)
@@ -1026,7 +1042,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if show {
             let height: CGFloat = 56
             let bottom = view.bounds.height - max(view.safeAreaInsets.bottom, 20) - 4
-            let frame = CGRect(x: 16, y: bottom - height, width: view.bounds.width - 32, height: height)
+            let wide = traitCollection.isWide
+            // 아이패드: 사이드바를 뺀 내용 자리 가운데
+            let left = wide ? view.safeAreaInsets.left : 0
+            let area = view.bounds.width - left - (wide ? view.safeAreaInsets.right : 0)
+            let width = wide ? min(380, area - 32) : view.bounds.width - 32
+            let frame = CGRect(x: left + (area - width) / 2, y: bottom - height - (wide ? 8 : 0), width: width, height: height)
             if modeBar.frame != frame { modeBar.frame = frame }
             if view.subviews.last !== modeBar { view.bringSubviewToFront(modeBar) }
         }
@@ -1829,6 +1850,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         guard isViewLoaded, collectionView != nil else { return }
         let wasAtLatest = isRoot && !needsScrollToLatest && isAtLatest
         collectionView.contentInset.bottom = view.safeAreaInsets.bottom
+        // 아이패드 사이드바가 열리고 닫히면 사진 자리를 다시 잼
+        if traitCollection.userInterfaceIdiom == .pad {
+            collectionView.collectionViewLayout.invalidateLayout()
+            updateModeBar()
+        }
         collectionView.verticalScrollIndicatorInsets = UIEdgeInsets(top: view.safeAreaInsets.top, left: 0,
                                                                     bottom: view.safeAreaInsets.bottom, right: 0)
         if wasAtLatest { scrollToLatest() }
@@ -2018,7 +2044,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     func zoomCoverRect() -> CGRect {
         var size = isViewLoaded ? view.bounds.size : .zero
         if size.width <= 0 { size = navigationController?.view.bounds.size ?? .zero }
-        let cover = (size.width * PhotoGridLayout.coverRatio).rounded()
+        let cover = (size.width * PhotoGridLayout.coverRatio(width: size.width)).rounded()
         let height = min(cover, size.height > 0 ? size.height : cover)
         return CGRect(x: 0, y: 0, width: size.width, height: height)
     }
@@ -2226,7 +2252,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
         hero.assetID = id
         let scale = traitCollection.displayScale
-        let size = CGSize(width: view.bounds.width * scale, height: view.bounds.width * PhotoGridLayout.coverRatio * scale)
+        let size = CGSize(width: view.bounds.width * scale, height: view.bounds.width * PhotoGridLayout.coverRatio(width: view.bounds.width) * scale)
         let options = PHImageRequestOptions()
         options.deliveryMode = .opportunistic
         options.isNetworkAccessAllowed = true
@@ -2649,6 +2675,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                     sort.accessibilityLabel = "정리하기"
                     sort.isEnabled = !list.isEmpty
                     items += [UIBarButtonItem.fixedSpace(8), sort]
+                }
+                // 아이패드: 오른쪽 끝에 검색 (순정 [필터][선택][검색])
+                if traitCollection.isWide {
+                    let search = UIBarButtonItem(image: UIImage(systemName: "magnifyingglass"), primaryAction: UIAction { [weak self] _ in
+                        self?.presentSearch()
+                    })
+                    items.insert(contentsOf: [search, UIBarButtonItem.fixedSpace(8)], at: 0)
                 }
                 navigationItem.rightBarButtonItems = items
             } else {

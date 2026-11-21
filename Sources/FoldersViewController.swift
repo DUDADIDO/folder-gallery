@@ -490,7 +490,13 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
             // 카드 크기는 세로 화면 너비로 셈 (순정: 가로로 돌려도 카드 크기는 그대로, 한 줄에 더 많이)
             let screen = self?.view.window?.windowScene?.screen.bounds.size ?? environment.container.contentSize
             let portraitWidth = min(width, min(screen.width, screen.height))
-            let cardSide = max(80, floor((portraitWidth - inset * 2 - gap * 2) / 3))
+            // 아이패드(넓은 화면): 순정처럼 카드 한 변 약 150pt, 한 줄에 들어가는 만큼
+            let wide = environment.traitCollection.horizontalSizeClass == .regular
+            func fitted(_ target: CGFloat) -> CGFloat {
+                let count = max(2, Int((width - inset * 2 + gap) / (target + gap)))
+                return floor((width - inset * 2 - gap * CGFloat(count - 1)) / CGFloat(count))
+            }
+            let cardSide = wide ? 150 : max(80, floor((portraitWidth - inset * 2 - gap * 2) / 3))
             let auto = self?.groups.indices.contains(index) == true && self?.groups[index].isAuto == true
             let list = self?.listMode ?? false
 
@@ -519,7 +525,7 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
                 section.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: inset, bottom: 24, trailing: inset)
             } else {
                 // 순정 iOS 27 '앨범' 화면: 두 칸 (양옆 16, 사이 8 — iPhone 14 Pro 에서 약 176pt)
-                let side = max(80, floor((portraitWidth - inset * 2 - gap) / 2))
+                let side = wide ? fitted(150) : max(80, floor((portraitWidth - inset * 2 - gap) / 2))
                 let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(widthDimension: .absolute(side),
                                                                                      heightDimension: .absolute(side)))
                 let groupSize = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(side))
@@ -1225,6 +1231,20 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
                 self?.createFolder()
             }
             items.append(UIBarButtonItem(image: UIImage(systemName: "plus"), menu: UIMenu(children: [newAlbum, newFolder])))
+        }
+        // 아이패드: 오른쪽 끝에 검색 (순정 모음 화면 [⋯][검색])
+        if traitCollection.isWide, mode == .top {
+            items.insert(UIBarButtonItem(image: UIImage(systemName: "magnifyingglass"), primaryAction: UIAction { [weak self] _ in
+                guard let self else { return }
+                let search = SearchViewController()
+                search.onOpenFolder = { [weak self] id in
+                    guard let self, let folder = Library.shared.snapshot.folders.first(where: { $0.id == id }) else { return }
+                    self.navigationController?.pushViewController(GridViewController(folder: folder), animated: true)
+                }
+                let nav = UINavigationController(rootViewController: search)
+                nav.modalPresentationStyle = .fullScreen
+                self.present(nav, animated: true)
+            }), at: 0)
         }
         navigationItem.rightBarButtonItems = items
     }

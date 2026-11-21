@@ -60,10 +60,21 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
                 return nav
             }
             search.automaticallyActivatesSearch = true
-            tabs.tabs = [tab(libraryNav, "library"), tab(albumsNav, "albums"), tab(unsortedNav, "unsorted"), search]
-            // iOS 27: 검색 탭을 따로 떨어진 둥근 버튼으로 (순정과 같은 자리)
-            if #available(iOS 27.0, *) {
-                tabs.prominentTabIdentifier = search.identifier
+            if windowScene.traitCollection.userInterfaceIdiom == .pad {
+                // 아이패드 (순정 iOS 27): 위 탭 막대 + 왼쪽 사이드바 단추. 검색은 탭이 아니라 각 화면 오른쪽 위 단추
+                tabs.tabs = [tab(libraryNav, "library"), tab(albumsNav, "albums"), tab(unsortedNav, "unsorted")]
+                tabs.mode = .tabSidebar
+                self.sidebarTabs = tabs
+                refreshSidebarAlbums()
+                NotificationCenter.default.addObserver(forName: Library.didChange, object: nil, queue: .main) { [weak self] _ in
+                    self?.refreshSidebarAlbums()
+                }
+            } else {
+                tabs.tabs = [tab(libraryNav, "library"), tab(albumsNav, "albums"), tab(unsortedNav, "unsorted"), search]
+                // iOS 27: 검색 탭을 따로 떨어진 둥근 버튼으로 (순정과 같은 자리)
+                if #available(iOS 27.0, *) {
+                    tabs.prominentTabIdentifier = search.identifier
+                }
             }
         } else {
             tabs.viewControllers = [libraryNav, albumsNav, unsortedNav]
@@ -87,12 +98,48 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
     }
 
     /// 검색에서 앨범을 고름: 앨범 탭에서 그 앨범을 엶
+    // MARK: 아이패드 사이드바의 '앨범' 묶음 (순정처럼 앨범마다 한 줄, 누르면 앨범 탭에서 그 앨범)
+
+    private weak var sidebarTabs: UITabBarController?
+    private var sidebarIDs: [String] = []
+
+    private func refreshSidebarAlbums() {
+        guard #available(iOS 26.0, *), let tabs = sidebarTabs else { return }
+        let folders = Library.shared.snapshot.folders.filter { !$0.isGroup && !Prefs.hiddenAlbums.contains($0.id) }
+        let ids = folders.map(\.id)
+        guard ids != sidebarIDs else { return }
+        sidebarIDs = ids
+        // 앨범 묶음은 비어 있으면 넣지 않음 (빈 묶음은 UIKit 이 받지 않음)
+        var list = tabs.tabs.filter { $0.identifier != "albumGroup" }
+        if !folders.isEmpty {
+            let children = folders.map { folder -> UITab in
+                // 그 앨범 격자를 오른쪽 넓은 자리에 (순정 사이드바의 앨범처럼)
+                let tab = UITab(title: folder.title, image: UIImage(systemName: folder.isUser ? "rectangle.stack" : folder.symbol),
+                                identifier: "folder:" + folder.id) { _ in GridViewController(folder: folder) }
+                tab.preferredPlacement = .sidebarOnly
+                return tab
+            }
+            // 묶음이 내비게이션을 맡아 고른 앨범 격자를 그 안에 띄움 (사진을 열면 그 안에서 우리 전환으로)
+            let group = UITabGroup(title: "앨범", image: nil, identifier: "albumGroup", children: children, viewControllerProvider: nil)
+            let nav = TopStyledNavigationController()
+            nav.delegate = PhotoNavigationDelegate.shared
+            group.managingNavigationController = nav
+            group.preferredPlacement = .sidebarOnly
+            list.append(group)
+        }
+        tabs.setTabs(list, animated: false)
+    }
+
     private func openFolder(_ id: String) {
         guard let folder = Library.shared.snapshot.folders.first(where: { $0.id == id }),
               let tabs = window?.rootViewController as? UITabBarController,
               let albums = tabs.viewControllers?.compactMap({ $0 as? UINavigationController })
                 .first(where: { $0.viewControllers.first is FoldersViewController }) else { return }
-        if let index = tabs.viewControllers?.firstIndex(where: { $0 === albums }) { tabs.selectedIndex = index }
+        if #available(iOS 18.0, *), let albumsTab = tabs.tabs.first(where: { $0.identifier == "albums" }) {
+            tabs.selectedTab = albumsTab
+        } else if let index = tabs.viewControllers?.firstIndex(where: { $0 === albums }) {
+            tabs.selectedIndex = index
+        }
         albums.popToRootViewController(animated: false)
         albums.pushViewController(GridViewController(folder: folder), animated: true)
     }

@@ -98,7 +98,7 @@ enum Prefs {
     static var albumGridColumns: Int {
         get {
             let value = defaults.integer(forKey: "albumGridColumns")
-            return value > 0 ? value : 3   // 순정 iOS 27 앨범 기본 3칸
+            return value > 0 ? value : (UIDevice.current.userInterfaceIdiom == .pad ? 5 : 3)   // 순정 iOS 27 앨범 기본 3칸 (아이패드 5칸)
         }
         set { defaults.set(newValue, forKey: "albumGridColumns") }
     }
@@ -496,4 +496,9 @@ final class AddToAlbumActivity: UIActivity {
         let action = self.action
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { action() }
     }
+}
+
+extension UITraitCollection {
+    /// 아이패드처럼 넓은 화면 (순정 사진 앱이 위 막대·사이드바 배치로 바뀌는 크기)
+    var isWide: Bool { horizontalSizeClass == .regular }
 }

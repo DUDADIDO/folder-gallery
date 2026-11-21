@@ -1103,10 +1103,10 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         delegate = self
 
         // 아래 막대 (순정처럼): 공유 | 하트·정보·앨범에 추가 | 휴지통. 자리는 viewDidLayoutSubviews 에서
-        let space = { UIBarButtonItem.flexibleSpace() }
-        bottomBar.items = [shareItem, space(), favoriteItem, infoItem, albumItem, space(), deleteItem]
-        // 오른쪽 위 ⋯
-        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeMoreMenu())
+        applyBarPlacement()
+        registerForTraitChanges([UITraitHorizontalSizeClass.self]) { (self: ViewerViewController, _) in
+            self.applyBarPlacement()
+        }
         setUpTitle()
 
         if !list.isEmpty {
@@ -1289,6 +1289,11 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         // 보는 동안은 아래 탭 막대를 숨김 (선택 모드와 같은 방법. 닫다가 취소했을 때도 여기서 다시 숨김)
         if #available(iOS 18.0, *) {
             tabBarController?.setTabBarHidden(true, animated: animated)
+            // 아이패드: 보는 동안 사이드바도 접음 (순정). 떠날 때 원래대로
+            if let tabs = tabBarController, !tabs.sidebar.isHidden {
+                hidSidebar = true
+                tabs.sidebar.isHidden = true
+            }
         }
     }
 
@@ -1323,6 +1328,10 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
         // 떠날 때는 언제나 아래 탭 막대를 다시 보임 (닫힘·이 위에 앨범을 엶·코드로 탭을 바꿈 — showInLibrary).
         // 이 위에 다른 화면을 열었다 돌아오거나 닫기를 취소하면 viewWillAppear 가 다시 숨김
         if #available(iOS 18.0, *), let tabs = tabBarController {
+            if hidSidebar {
+                hidSidebar = false
+                tabs.sidebar.isHidden = false
+            }
             if let coordinator = transitionCoordinator, coordinator.isInteractive, closesWithPhotoTransition(coordinator) {
                 // 끌어 닫기: 애니메이션으로 보이면 손가락 전환에 묶여 멈춘 채 남음(투명). 바로 보이게 하고 투명도는 전환이 손가락을 따라 바꿈
                 tabs.setTabBarHidden(false, animated: false)
@@ -1378,12 +1387,45 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
             self.bottomBar.layoutIfNeeded()
             self.layoutBottomBar()
             self.view.setNeedsLayout()
+            // 돌린 뒤 페이지 스크롤이 옛 크기로 남지 않게 지금 페이지를 다시 놓음
+            if let page = self.viewControllers?.first {
+                self.setViewControllers([page], direction: .forward, animated: false)
+            }
         }
+    }
+
+    /// 아이폰: 아래 막대 [공유 | ♡ ⓘ 앨범 | 휴지통] + 오른쪽 위 ⋯.
+    /// 아이패드(넓은 화면, 순정 iOS 27): 아래 막대 없이 위에 [뒤로][공유 ♡] … [앨범 ⓘ 휴지통 ⋯]
+    private lazy var moreItem = UIBarButtonItem(image: UIImage(systemName: "ellipsis"), menu: makeMoreMenu())
+    /// 보는 동안 우리가 접은 사이드바 (떠날 때 다시 폄)
+    private var hidSidebar = false
+    private var usesTopBar = false
+
+    private func applyBarPlacement() {
+        usesTopBar = traitCollection.isWide
+        if usesTopBar {
+            bottomBar.items = []
+            bottomBar.isHidden = true
+            navigationItem.leftItemsSupplementBackButton = true
+            navigationItem.leftBarButtonItems = [shareItem, favoriteItem]
+            navigationItem.rightBarButtonItems = [moreItem, deleteItem, infoItem, albumItem]
+        } else {
+            navigationItem.leftBarButtonItems = nil
+            navigationItem.rightBarButtonItems = [moreItem]
+            let space = { UIBarButtonItem.flexibleSpace() }
+            bottomBar.items = [shareItem, space(), favoriteItem, infoItem, albumItem, space(), deleteItem]
+            bottomBar.isHidden = chromeHidden
+        }
+        if isViewLoaded { view.setNeedsLayout() }
     }
 
     private func layoutBottomBar() {
         let bounds = view.bounds
         guard bounds.width > 0 else { return }
+        if usesTopBar {
+            if additionalSafeAreaInsets.bottom != 0 { additionalSafeAreaInsets.bottom = 0 }
+            return
+        }
         let fitted = bottomBar.sizeThatFits(CGSize(width: bounds.width, height: 100)).height
         let height = fitted > 1 ? fitted : 44
         // 창의 안전 영역(홈 막대)을 씀: 탭 막대가 숨는 중이거나 우리가 더한 만큼이 아직 반영되기 전에도 흔들리지 않게
@@ -1652,6 +1694,10 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
     /// 유리 막대가 투명도를 안 따를 때를 대비해 거의 투명하면 숨김. 움직이는 중이면 끝난 뒤에 (사라지는 게 보이게)
     private func syncBottomBarHidden(_ alpha: CGFloat) {
+        if usesTopBar {
+            bottomBar.isHidden = true
+            return
+        }
         if alpha > 0.02 {
             bottomBar.isHidden = false
             return
