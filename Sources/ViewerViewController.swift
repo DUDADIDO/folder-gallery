@@ -2210,7 +2210,7 @@ final class ViewerViewController: UIPageViewController, UIPageViewControllerData
 
 // MARK: - 슬라이드쇼 (검은 바탕에 사진이 3초마다 천천히 바뀜. 누르면 끝)
 
-final class SlideshowViewController: UIViewController {
+final class SlideshowViewController: UIViewController, UIGestureRecognizerDelegate {
     private let count: Int
     private var index: Int
     private let assetAt: (Int) -> PHAsset?
@@ -2230,6 +2230,17 @@ final class SlideshowViewController: UIViewController {
     private let titleLabel = UILabel()
     private let playButton = UIButton(type: .system)
     private var paused = false
+    /// 오른쪽 위 [소리 | ⋯] (순정)
+    private let pill = UIView()
+    private let soundButton = UIButton(type: .system)
+    private let moreButton = UIButton(type: .system)
+    /// 아래 썸네일 줄 (지금 사진만 넓게, 누르면 그 사진으로) + 사용자화
+    private let strip = UIScrollView()
+    private let customizeButton = UIButton(type: .system)
+    private var muted = true
+    private var repeats = true
+    /// 사진 한 장 보여 주는 시간
+    private var interval: TimeInterval = 3
 
     private static let dateText: DateFormatter = {
         let formatter = DateFormatter()
@@ -2298,7 +2309,53 @@ final class SlideshowViewController: UIViewController {
         playButton.configuration = play
         playButton.tintColor = .label
         playButton.addAction(UIAction { [weak self] _ in self?.setPaused(false) }, for: .primaryActionTriggered)
-        for item in [backButton, titleLabel, playButton] as [UIView] {
+
+        // 오른쪽 위 둥근 막대: 소리 · ⋯
+        if #available(iOS 26.0, *) {
+            let glass = UIVisualEffectView(effect: UIGlassEffect())
+            glass.cornerConfiguration = .capsule()
+            glass.translatesAutoresizingMaskIntoConstraints = false
+            pill.addSubview(glass)
+            NSLayoutConstraint.activate([
+                glass.topAnchor.constraint(equalTo: pill.topAnchor), glass.bottomAnchor.constraint(equalTo: pill.bottomAnchor),
+                glass.leadingAnchor.constraint(equalTo: pill.leadingAnchor), glass.trailingAnchor.constraint(equalTo: pill.trailingAnchor),
+            ])
+        } else {
+            pill.backgroundColor = UIColor.white.withAlphaComponent(0.2)
+            pill.layer.cornerRadius = 22
+        }
+        let symbol = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        soundButton.setPreferredSymbolConfiguration(symbol, forImageIn: .normal)
+        soundButton.tintColor = .white
+        soundButton.addAction(UIAction { [weak self] _ in self?.toggleSound() }, for: .primaryActionTriggered)
+        moreButton.setImage(UIImage(systemName: "ellipsis", withConfiguration: symbol), for: .normal)
+        moreButton.tintColor = .white
+        moreButton.showsMenuAsPrimaryAction = true
+        moreButton.menu = makeMoreMenu()
+        let pillStack = UIStackView(arrangedSubviews: [soundButton, moreButton])
+        pillStack.distribution = .fillEqually
+        pillStack.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(pillStack)
+        NSLayoutConstraint.activate([
+            pillStack.topAnchor.constraint(equalTo: pill.topAnchor), pillStack.bottomAnchor.constraint(equalTo: pill.bottomAnchor),
+            pillStack.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 4),
+            pillStack.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -4),
+        ])
+        updateSoundIcon()
+
+        strip.showsHorizontalScrollIndicator = false
+        strip.alwaysBounceHorizontal = true
+        var customize = UIButton.Configuration.plain()
+        if #available(iOS 26.0, *) { customize = .glass() }
+        customize.title = "사용자화"
+        customize.cornerStyle = .capsule
+        customize.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 22, bottom: 12, trailing: 22)
+        customizeButton.configuration = customize
+        customizeButton.tintColor = .label
+        customizeButton.showsMenuAsPrimaryAction = true
+        customizeButton.menu = makeCustomizeMenu()
+
+        for item in [backButton, titleLabel, playButton, pill, strip, customizeButton] as [UIView] {
             item.translatesAutoresizingMaskIntoConstraints = false
             chrome.addSubview(item)
         }
@@ -2310,6 +2367,16 @@ final class SlideshowViewController: UIViewController {
             backButton.heightAnchor.constraint(equalToConstant: 44),
             titleLabel.centerXAnchor.constraint(equalTo: chrome.centerXAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            pill.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -16),
+            pill.centerYAnchor.constraint(equalTo: backButton.centerYAnchor),
+            pill.widthAnchor.constraint(equalToConstant: 104),
+            pill.heightAnchor.constraint(equalToConstant: 44),
+            customizeButton.centerXAnchor.constraint(equalTo: chrome.centerXAnchor),
+            customizeButton.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -8),
+            strip.leadingAnchor.constraint(equalTo: chrome.leadingAnchor),
+            strip.trailingAnchor.constraint(equalTo: chrome.trailingAnchor),
+            strip.bottomAnchor.constraint(equalTo: customizeButton.topAnchor, constant: -28),
+            strip.heightAnchor.constraint(equalToConstant: 34),
             playButton.centerXAnchor.constraint(equalTo: chrome.centerXAnchor),
             playButton.centerYAnchor.constraint(equalTo: chrome.centerYAnchor),
             playButton.widthAnchor.constraint(equalToConstant: 64),
@@ -2317,7 +2384,9 @@ final class SlideshowViewController: UIViewController {
         ])
 
         // 순정: 누르면 멈추고 단추가 보임. 다시 누르면 이어서
-        view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
+        tap.delegate = self
+        view.addGestureRecognizer(tap)
         show(index, animated: false)
     }
 
@@ -2339,6 +2408,90 @@ final class SlideshowViewController: UIViewController {
         setPaused(!paused)
     }
 
+    /// 단추·썸네일 줄을 누른 것은 멈춤/재생으로 치지 않음
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        var view = touch.view
+        while let current = view {
+            if current is UIControl || current === strip || current === pill { return false }
+            view = current.superview
+        }
+        return true
+    }
+
+    // MARK: 멈춘 화면의 단추들
+
+    private func toggleSound() {
+        muted.toggle()
+        player?.isMuted = muted
+        updateSoundIcon()
+    }
+
+    private func updateSoundIcon() {
+        soundButton.setImage(UIImage(systemName: muted ? "speaker.slash" : "speaker.wave.2"), for: .normal)
+    }
+
+    private func makeMoreMenu() -> UIMenu {
+        UIMenu(children: [
+            UIAction(title: "반복", image: UIImage(systemName: "repeat"), state: repeats ? .on : .off) { [weak self] _ in
+                guard let self else { return }
+                self.repeats.toggle()
+                self.moreButton.menu = self.makeMoreMenu()
+            },
+        ])
+    }
+
+    /// 순정의 사용자화(음악·테마)는 공개 API 가 없어서 넘기는 속도만
+    private func makeCustomizeMenu() -> UIMenu {
+        let speeds: [(String, TimeInterval)] = [("느리게", 5), ("보통", 3), ("빠르게", 1.5)]
+        return UIMenu(title: "넘기는 속도", options: .displayInline, children: speeds.map { name, seconds in
+            UIAction(title: name, state: interval == seconds ? .on : .off) { [weak self] _ in
+                guard let self else { return }
+                self.interval = seconds
+                self.customizeButton.menu = self.makeCustomizeMenu()
+            }
+        })
+    }
+
+    /// 지금 사진 앞뒤 썸네일 (지금 것만 넓게). 누르면 그 사진으로
+    private func rebuildStrip() {
+        strip.subviews.forEach { $0.removeFromSuperview() }
+        let height: CGFloat = 34, narrow: CGFloat = 21, wide: CGFloat = 54, gap: CGFloat = 2
+        let range = max(0, index - 12)...min(count - 1, index + 12)
+        var x: CGFloat = 0
+        var currentMid: CGFloat = 0
+        for i in range {
+            guard let asset = assetAt(i) else { continue }
+            let current = i == index
+            if current { x += 6 }
+            let width = current ? wide : narrow
+            let button = UIButton(type: .custom)
+            button.frame = CGRect(x: x, y: 0, width: width, height: height)
+            button.layer.cornerRadius = 5
+            button.layer.cornerCurve = .continuous
+            button.clipsToBounds = true
+            button.imageView?.contentMode = .scaleAspectFill
+            button.contentHorizontalAlignment = .fill
+            button.contentVerticalAlignment = .fill
+            PHImageManager.default().requestImage(for: asset, targetSize: CGSize(width: wide * 3, height: height * 3),
+                                                  contentMode: .aspectFill, options: nil) { [weak button] image, _ in
+                button?.setImage(image, for: .normal)
+            }
+            button.addAction(UIAction { [weak self] _ in
+                guard let self else { return }
+                self.index = i
+                self.show(i, animated: true)
+            }, for: .primaryActionTriggered)
+            strip.addSubview(button)
+            if current { currentMid = x + width / 2; x += 6 }
+            x += width + gap
+        }
+        strip.contentSize = CGSize(width: x, height: height)
+        // 지금 사진이 가운데에 오게
+        let inset = max(0, view.bounds.width / 2)
+        strip.contentInset = UIEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
+        strip.contentOffset = CGPoint(x: currentMid - inset, y: 0)
+    }
+
     private func setPaused(_ on: Bool) {
         paused = on
         UIView.animate(withDuration: 0.25) {
@@ -2347,6 +2500,7 @@ final class SlideshowViewController: UIViewController {
         }
         setNeedsUpdateOfHomeIndicatorAutoHidden()
         if on {
+            rebuildStrip()
             timer?.invalidate()
             timer = nil
             player?.pause()
@@ -2362,11 +2516,16 @@ final class SlideshowViewController: UIViewController {
         timer?.invalidate()
         timer = nil
         guard !paused, player == nil, view.window != nil else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in self?.advance() }
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in self?.advance() }
     }
 
     private func advance() {
         guard count > 1 else { return }
+        // 반복을 끄면 마지막 사진에서 멈춤
+        if !repeats && index == count - 1 {
+            setPaused(true)
+            return
+        }
         index = (index + 1) % count
         show(index, animated: true)
     }
@@ -2385,6 +2544,7 @@ final class SlideshowViewController: UIViewController {
         guard let asset = assetAt(index) else { return }
         stopVideo()
         titleLabel.text = asset.creationDate.map { Self.dateText.string(from: $0) }
+        if paused { rebuildStrip() }
         PHImageManager.default().cancelImageRequest(requestID)
         let options = PHImageRequestOptions()
         options.isNetworkAccessAllowed = true
@@ -2415,7 +2575,7 @@ final class SlideshowViewController: UIViewController {
                 DispatchQueue.main.async {
                     guard let self, let item, self.index == index else { return }
                     let player = AVPlayer(playerItem: item)
-                    player.isMuted = true
+                    player.isMuted = self.muted
                     self.player = player
                     self.videoView.playerLayer.player = player
                     self.videoView.isHidden = false
