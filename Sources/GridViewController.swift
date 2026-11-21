@@ -1862,6 +1862,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if !force && new.version == list.version {
             list = new   // 들어 있는 사진·순서는 같고, 즐겨찾기·편집 상태가 바뀐 새 값으로
             refreshHero()   // 이름·표지가 바뀌었을 수 있음
+            // 편집된 사진은 디스크 썸네일을 새로 (이름에 수정 시각이 들어 있어 없는 것만 만듦)
+            if folder.id == "all", isRoot { ThumbStore.shared.build(Library.shared.list(for: "all", newestFirst: false)) }
+            // 보이는 칸 그림도 새로 (편집으로 그림이 바뀌었을 수 있음)
+            reloadVisibleThumbnails()
             // 보이는 칸의 하트를 새 값으로 (보기 화면에서 즐겨찾기를 바꾸고 돌아온 경우)
             let compact = isDense
             for path in collectionView.indexPathsForVisibleItems {
