@@ -1143,10 +1143,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             anchor = (tile.id, tile.frame, tile.image, 0)
             if let path = indexPath(forAssetID: tile.id) { anchorContent = collectionView.cellForItem(at: path)?.contentView }
         }
-        // 앞 화면 사진에서 그 사진은 빼고 찍음 (날아가는 사진과 두 장으로 보이지 않게)
-        anchorContent?.alpha = 0
-        let before = view.snapshotView(afterScreenUpdates: true)
-        anchorContent?.alpha = 1
+        // 앞 화면을 그대로 찍음 (숨기고 찍으면 그 한 프레임이 실제 화면에 비어 보였음).
+        // 찍힌 그 사진은 날아가는 사진과 같은 길로 커지며 빨리 사라져 두 장으로 보이지 않음
+        _ = anchorContent
+        let before = view.snapshotView(afterScreenUpdates: false)
         setLibraryMode(mode) { [weak self] in
             guard let self else { return }
             self.morphAnchor(anchor, before: before, to: mode)
@@ -1160,8 +1160,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             view.insertSubview(before, belowSubview: modeBar)
             let anim = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
                 before.transform = transform
-                before.alpha = 0
             }
+            // 앞 화면은 커지며 앞쪽에서 빨리 사라짐
+            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut]) { before.alpha = 0 }
             anim.addCompletion { _ in before.removeFromSuperview() }
             anim.startAnimation()
         }
@@ -1418,7 +1419,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 grid.transform = mapping(from: from, to: to)
                 child.view.transform = .identity
             }
-            zoom.addCompletion { _ in grid.transform = .identity }
+            // 커지는 격자는 앞쪽에서 빨리 사라짐 (사진 주변에 확대된 칸이 남아 보이지 않게)
+            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut]) { grid.alpha = 0 }
+            zoom.addCompletion { _ in
+                grid.transform = .identity
+                grid.alpha = 1
+            }
             zoom.startAnimation()
         }
         UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut]) { child.view.alpha = 1 }
