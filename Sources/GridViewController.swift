@@ -1555,7 +1555,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         state.fingerY = point.y - collectionView.contentOffset.y
         state.fingerX = point.x
         // 칸 한 변이 손가락 벌림에 그대로 비례하게: 기준 칸 수의 한 변 × (지금 벌림 ÷ 기준 벌림)
-        var scale = gesture.scale / state.startScale
+        let scale = gesture.scale / state.startScale
         while true {
             let step = scale > 1 ? -1 : (scale < 1 ? 1 : 0)   // 벌리면 칸 수가 적은 쪽(크게)
             let target = state.base + step
@@ -1566,13 +1566,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
             let ratio = levelSide(target) / levelSide(state.base)
             let progress = abs(ratio - 1) > 0.001 ? (scale - 1) / (ratio - 1) : 0
-            if progress >= 1, levels.indices.contains(target + step) {
-                // 다음 단계를 지나침: 그 칸 수를 새 기준으로 해서 이어감 (한 번에 5 → 3 → 1)
-                state.base = target
-                state.startScale *= ratio
-                scale = gesture.scale / state.startScale
-                continue
-            }
+            // 순정처럼 한 번 오므리거나 벌리면 한 단계만 (크게 벌려도 31 → 1 로 건너뛰지 않음)
             state.target = target
             state.progress = min(1, max(0, progress))
             break
@@ -1864,6 +1858,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if !force && new.version == list.version {
             list = new   // 들어 있는 사진·순서는 같고, 즐겨찾기·편집 상태가 바뀐 새 값으로
             refreshHero()   // 이름·표지가 바뀌었을 수 있음
+            // 보이는 칸의 하트를 새 값으로 (보기 화면에서 즐겨찾기를 바꾸고 돌아온 경우)
+            let compact = isDense
+            for path in collectionView.indexPathsForVisibleItems {
+                guard path.section < sections.count, path.item < sections[path.section].range.count,
+                      let cell = collectionView.cellForItem(at: path) as? AssetCell else { continue }
+                cell.setFavorite(!compact && assetAt(path).isFavorite)
+            }
             return
         }
 
