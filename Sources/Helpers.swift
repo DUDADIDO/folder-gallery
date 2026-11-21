@@ -35,6 +35,9 @@ extension UIViewController {
     /// 잠깐 떴다 사라지는 안내
     func toast(_ text: String) {
         let host: UIView = view.window ?? view
+        // 아이패드: 사이드바를 뺀 내용 자리 가운데, 아래 막대보다 위
+        let isPad = traitCollection.userInterfaceIdiom == .pad
+        let sideShift = isPad && view.window != nil ? (view.safeAreaInsets.left - view.safeAreaInsets.right) / 2 : 0
         let label = PaddedLabel()
         label.text = text
         label.font = .systemFont(ofSize: 14, weight: .medium)
@@ -48,8 +51,8 @@ extension UIViewController {
         label.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(label)
         NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: host.centerXAnchor),
-            label.bottomAnchor.constraint(equalTo: host.safeAreaLayoutGuide.bottomAnchor, constant: -72),
+            label.centerXAnchor.constraint(equalTo: host.centerXAnchor, constant: sideShift),
+            label.bottomAnchor.constraint(equalTo: host.safeAreaLayoutGuide.bottomAnchor, constant: isPad ? -92 : -72),
             label.widthAnchor.constraint(lessThanOrEqualTo: host.widthAnchor, constant: -48),
         ])
         UIView.animate(withDuration: 0.2, animations: { label.alpha = 1 }, completion: { _ in

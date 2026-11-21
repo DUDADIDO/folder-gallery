@@ -464,7 +464,9 @@ final class SearchResultsViewController: UIViewController, UICollectionViewDataS
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let side = floor((view.bounds.width - 4) / 3)
+        // 아이폰 3칸, 아이패드(넓음) 5칸
+        let perRow: CGFloat = traitCollection.isWide ? 5 : 3
+        let side = floor((view.bounds.width - 2 * (perRow - 1)) / perRow)
         (collectionView.collectionViewLayout as? UICollectionViewFlowLayout)?.itemSize = CGSize(width: side, height: side)
     }
 

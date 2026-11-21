@@ -574,8 +574,9 @@ final class FoldersViewController: UIViewController, UICollectionViewDataSource,
         messageView.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.centerYAnchor.constraint(equalTo: messageView.centerYAnchor),
-            stack.leadingAnchor.constraint(equalTo: messageView.leadingAnchor, constant: 32),
-            stack.trailingAnchor.constraint(equalTo: messageView.trailingAnchor, constant: -32),
+            // 안전 영역 기준 (아이패드 사이드바를 뺀 자리 가운데)
+            stack.leadingAnchor.constraint(equalTo: messageView.safeAreaLayoutGuide.leadingAnchor, constant: 32),
+            stack.trailingAnchor.constraint(equalTo: messageView.safeAreaLayoutGuide.trailingAnchor, constant: -32),
         ])
     }
 

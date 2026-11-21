@@ -1853,7 +1853,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 아이패드 사이드바가 열리고 닫히면 사진 자리를 다시 잼
         if traitCollection.userInterfaceIdiom == .pad {
             collectionView.collectionViewLayout.invalidateLayout()
-            updateModeBar()
+            // 제목·연도 칩·아래 붙임도 새 자리로 (크기는 그대로라 저절로 다시 놓이지 않음)
+            view.setNeedsLayout()
         }
         collectionView.verticalScrollIndicatorInsets = UIEdgeInsets(top: view.safeAreaInsets.top, left: 0,
                                                                     bottom: view.safeAreaInsets.bottom, right: 0)
