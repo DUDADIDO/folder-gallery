@@ -255,8 +255,12 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
 
     /// 연도 카드를 누름 → 그해 첫 달로 월 보기
     var onPickYear: ((Int) -> Void)?
-    /// 날짜 칸을 누름 → 그날 첫 사진으로 전체 보기
-    var onPickDay: ((String) -> Void)?
+    /// 날짜 칸을 누름 → 그날 첫 사진으로 전체 보기. 누른 칸 자리(이 화면 좌표)·그림·모서리도 같이 (날아가는 애니메이션)
+    var onPickDay: ((String, CGRect, UIImage?, CGFloat) -> Void)?
+
+    /// 연도 카드를 눌러 월로 넘어갈 때: 그 사진이 같은 자리에 머물고 나머지만 겹쳐 바뀜 (순정)
+    private struct Anchor { let assetID: String; let y: CGFloat; let image: UIImage?; let snapshot: UIView? }
+    private var anchor: Anchor?
 
     init(mode: LibraryMode) {
         self.mode = mode
@@ -289,7 +293,28 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
         collectionView.setCollectionViewLayout(makeLayout(), animated: false)
         collectionView.reloadData()
         collectionView.layoutIfNeeded()
-        if mode == .months, let month = scrollToMonth, month < data.months.count {
+        if mode == .months, let anchor, let month = scrollToMonth, month < data.months.count {
+            self.anchor = nil
+            // 누른 연도 카드의 사진이 들어 있는 날 칸을, 카드가 있던 높이에 맞춰 놓음
+            let item = data.months[month].days.firstIndex { $0.cover.localIdentifier == anchor.assetID } ?? 0
+            let path = IndexPath(item: item, section: month)
+            if let attributes = collectionView.layoutAttributesForItem(at: path) {
+                let inset = collectionView.adjustedContentInset
+                let maxY = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
+                let y = min(maxY, max(-inset.top, attributes.frame.minY - anchor.y))
+                collectionView.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+                collectionView.layoutIfNeeded()
+                (collectionView.cellForItem(at: path) as? MomentCell)?.prefill(anchor.image)
+            }
+            // 앞 화면(연도 카드들)을 위에 얹어 0.27초 동안 겹쳐 사라지게
+            if let snapshot = anchor.snapshot {
+                snapshot.frame = view.bounds
+                view.addSubview(snapshot)
+                UIView.animate(withDuration: 0.27, delay: 0, options: [.curveEaseInOut]) {
+                    snapshot.alpha = 0
+                } completion: { _ in snapshot.removeFromSuperview() }
+            }
+        } else if mode == .months, let month = scrollToMonth, month < data.months.count {
             let path = IndexPath(item: 0, section: month)
             if let attributes = collectionView.layoutAttributesForSupplementaryElement(ofKind: UICollectionView.elementKindSectionHeader, at: path) {
                 let y = attributes.frame.minY - collectionView.adjustedContentInset.top
@@ -418,9 +443,20 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
         if mode == .years {
-            onPickYear?(data.years[indexPath.item].firstMonthIndex)
+            let year = data.years[indexPath.item]
+            // 대표 사진이 있는 달로 (순정: 누른 카드의 사진이 그 달 카드로 이어짐)
+            let month = data.months.firstIndex { $0.year == year.year && $0.month == year.coverMonth } ?? year.firstMonthIndex
+            if let cell = collectionView.cellForItem(at: indexPath) as? MomentCell {
+                let frame = cell.convert(cell.bounds, to: view)
+                anchor = Anchor(assetID: year.cover.localIdentifier, y: frame.minY,
+                                image: cell.image, snapshot: view.snapshotView(afterScreenUpdates: false))
+            }
+            onPickYear?(month)
         } else {
-            onPickDay?(data.months[indexPath.section].days[indexPath.item].firstID)
+            let day = data.months[indexPath.section].days[indexPath.item]
+            let cell = collectionView.cellForItem(at: indexPath) as? MomentCell
+            let frame = cell.map { $0.convert($0.bounds, to: view) } ?? .zero
+            onPickDay?(day.firstID, frame, cell?.image, cell?.contentView.layer.cornerRadius ?? 0)
         }
     }
 }
@@ -457,6 +493,14 @@ final class MomentCell: UICollectionViewCell {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// 지금 보이는 그림 (넘어가는 애니메이션이 이어 씀)
+    var image: UIImage? { imageView.image }
+
+    /// 넘어오는 애니메이션: 받기 전에 앞 화면의 같은 사진을 미리 (회색 칸이 보이지 않게)
+    func prefill(_ image: UIImage?) {
+        if imageView.image == nil { imageView.image = image }
     }
 
     func configure(asset: PHAsset, title: String, subtitle: String?, large: Bool, size: CGSize) {

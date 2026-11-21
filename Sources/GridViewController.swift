@@ -1131,7 +1131,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         } else {
             child = MomentsViewController(mode: mode)
             child.onPickYear = { [weak self] month in self?.setLibraryMode(.months, month: month) }
-            child.onPickDay = { [weak self] id in self?.openDay(id) }
+            child.onPickDay = { [weak self] id, frame, image, radius in self?.openDay(id, from: frame, image: image, radius: radius) }
             addChild(child)
             child.view.frame = view.bounds
             child.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -1189,11 +1189,43 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     /// 월 보기에서 날짜를 누름 → 전체 보기(3칸)에서 그날로
-    private func openDay(_ id: String) {
+    /// 월 보기에서 날 칸을 누름 (순정): 그 사진이 줄어들며 3칸 격자의 제자리로 날아가고, 월 화면은 겹쳐 사라짐
+    private func openDay(_ id: String, from frame: CGRect = .zero, image: UIImage? = nil, radius: CGFloat = 0) {
+        let monthsSnapshot = moments?.view.snapshotView(afterScreenUpdates: false)
         setLibraryMode(.all)
         setColumnsDirectly(3)
         reveal(assetID: id)
         updateModeBar()
+        guard frame.width > 0, let image, let path = indexPath(forAssetID: id) else { return }
+        collectionView.layoutIfNeeded()
+        guard let cell = collectionView.cellForItem(at: path) else { return }
+        let target = cell.convert(cell.bounds, to: view)
+        // 월 화면을 위에 얹고 사라지게
+        if let monthsSnapshot {
+            monthsSnapshot.frame = view.bounds
+            view.addSubview(monthsSnapshot)
+            UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut]) {
+                monthsSnapshot.alpha = 0
+            } completion: { _ in monthsSnapshot.removeFromSuperview() }
+        }
+        // 누른 사진은 그 위에서 제자리로 날아감
+        let flyer = UIImageView(image: image)
+        flyer.contentMode = .scaleAspectFill
+        flyer.clipsToBounds = true
+        flyer.layer.cornerRadius = radius
+        flyer.layer.cornerCurve = .continuous
+        flyer.frame = frame
+        view.addSubview(flyer)
+        cell.contentView.alpha = 0
+        let anim = UIViewPropertyAnimator(duration: 0.34, dampingRatio: 0.88) {
+            flyer.frame = target
+            flyer.layer.cornerRadius = 0
+        }
+        anim.addCompletion { _ in
+            cell.contentView.alpha = 1
+            flyer.removeFromSuperview()
+        }
+        anim.startAnimation()
     }
 
     /// 아래 막대의 보관함 아이콘 → 보통 칸으로 돌아가고 탭 막대가 다시 보임
@@ -1507,9 +1539,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 self.showAccessory(false)
             }
         }
-        // 처음(맨 아래)엔 펴진 탭 막대만. 위로 스크롤해 줄어들 때 붙임
-        showAccessory(accessoryAlwaysNeeded || tabBarIsMinimized)
+        // 처음(맨 아래)엔 펴진 탭 막대만. 위로 스크롤해 줄어들 때 붙임. 사진 보기에서 돌아오면 있던 대로
+        showAccessory(accessoryAlwaysNeeded || tabBarIsMinimized || accessoryWasShown)
+        accessoryWasShown = false
     }
+
+    private var accessoryWasShown = false
 
     /// 한 화면에 다 들어와 스크롤할 수 없으면 탭 막대가 줄어들 일이 없음 → [년 | 월 | 전체] 를 늘 둠 (안 그러면 갈 길이 없음)
     private var accessoryAlwaysNeeded: Bool {
@@ -1551,6 +1586,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 칸 수를 바꾸던 중이면 가까운 칸 수로 바로 마침
         finishPinchNow()
         removeNativeModeBarIfLeavingTab()
+        // 사진 보기 등 위에 화면을 열면 [년 | 월 | 전체] 를 뺌 (탭 막대는 숨어도 액세서리는 남아 사진 위에 뜸)
+        if usesNativeModeBar, #available(iOS 26.0, *), let tabs = tabBarController, tabs.bottomAccessory != nil {
+            tabs.setBottomAccessory(nil, animated: false)
+            accessoryWasShown = true
+        }
         holdReloadsDuringTransition()
         navigationController?.setBackSwipe(blocked: nil, by: self)
         // 선택 모드인 채로 닫히면(앨범이 지워짐 등) 뒤 화면에 막힌 채로 남지 않게
