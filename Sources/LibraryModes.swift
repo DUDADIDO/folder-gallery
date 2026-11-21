@@ -160,110 +160,54 @@ final class LibraryModeBar: UIView {
     }
 
     // MARK: 탭 막대와 서로 바뀌는 모양 (순정 iOS 27)
-    // 사진 아이콘 동그라미가 늘어나 탭 막대 캡슐이 되고, 돌아올 때는 거꾸로 줄어듦.
-    // 진짜 탭 막대는 시스템 것이라, 늘어난 동그라미가 그 자리·모양에 닿은 뒤 서로 바꿔 끼움
+    // 유리는 이 막대의 캡슐 한 장만 씀 (유리 두 장을 겹치면 하얗게 떠서 깜빡임).
+    // 캡슐이 늘어나 탭 막대 캡슐 자리·모양이 된 그 프레임에 진짜 탭 막대와 바꿔 끼움
 
-    /// 늘고 줄어드는 유리 동그라미. 미리 만들어 계속 둠 (새로 만든 유리는 처음 나타날 때 시스템이 0.3초쯤 서서히 그려서
-    /// 돌아올 때 줄어드는 모습이 안 보였음). 평소에는 거의 투명하게 사진 아이콘 자리에
-    private lazy var bubbleView: UIVisualEffectView = {
-        let v = makeBubble()
-        v.isUserInteractionEnabled = false
-        v.alpha = 0.011
-        return v
-    }()
-    private var bubble: UIVisualEffectView?
+    private var morphingShape = false
 
-    private func makeBubble() -> UIVisualEffectView {
-        let v: UIVisualEffectView
-        if #available(iOS 26.0, *) {
-            v = UIVisualEffectView(effect: UIGlassEffect())
-        } else {
-            v = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
-        }
-        v.layer.cornerCurve = .continuous
-        v.clipsToBounds = true
-        let icon = UIImageView(image: libraryButton.image(for: .normal))
-        icon.tintColor = .systemBlue
-        icon.contentMode = .center
-        icon.tag = 1
-        v.contentView.addSubview(icon)
-        addSubview(v)
-        return v
-    }
-
-    /// 동그라미(사진 아이콘 자리) — 이 막대 좌표
-    private var circleFrame: CGRect {
-        convert(libraryButton.frame, from: libraryButton.superview).insetBy(dx: -2, dy: -2)
-    }
-
-    private func place(_ v: UIVisualEffectView, _ frame: CGRect) {
-        v.frame = frame
-        v.layer.cornerRadius = frame.height / 2
-        if let icon = v.contentView.viewWithTag(1) {
-            // 아이콘은 왼쪽 동그라미 자리 그대로 (탭 막대의 '보관함' 쪽)
-            icon.frame = CGRect(x: 0, y: 0, width: min(frame.width, frame.height + 8), height: frame.height)
-        }
+    private func setCapsule(_ frame: CGRect) {
+        capsule.frame = frame
+        capsule.layer.cornerRadius = frame.height / 2
     }
 
     /// 막대 → 탭 막대 모양. target 은 탭 막대 캡슐 자리, searchTarget 은 탭 막대 검색 자리 (이 막대 좌표).
-    /// swap 은 캡슐이 거의 다 늘어났을 때(진짜 탭 막대로 바꿔 끼울 때), done 은 다 끝났을 때
+    /// swap 은 모양이 같아졌을 때(진짜 탭 막대로 바꿔 끼울 때) 한 번
     func morphToTabs(target: CGRect, searchTarget: CGRect?, swap: @escaping () -> Void, done: @escaping () -> Void) {
-        let b = bubbleView
-        bubble = b
-        bringSubviewToFront(b)
-        b.alpha = 1
-        let circle = circleFrame
-        place(b, circle)
-        libraryButton.alpha = 0
-        // 순정: 누르면 동그라미가 살짝 부풀고(0.08초) 곧 오른쪽으로 늘어나 탭 막대 캡슐이 됨
-        UIView.animate(withDuration: 0.08, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
-            self.place(b, circle.insetBy(dx: -5, dy: -5))
-        } completion: { _ in
-            let anim = UIViewPropertyAnimator(duration: 0.3, dampingRatio: 0.85) {
-                self.place(b, target)
-                if let searchTarget { self.searchButton.frame = searchTarget }
-            }
-            anim.addAnimations({ self.segments.alpha = 0; self.capsule.alpha = 0 }, delayFactor: 0)
-            anim.addCompletion { _ in done() }
-            anim.startAnimation()
-            // 늘어나는 도중에 탭 막대 글자가 나타남 (끝까지 기다리면 빈 캡슐이 잠깐 멈춰 보임)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) { swap() }
+        morphingShape = true
+        let anim = UIViewPropertyAnimator(duration: 0.3, dampingRatio: 0.9) {
+            self.setCapsule(target)
+            if let searchTarget { self.searchButton.frame = searchTarget }
+            self.segments.alpha = 0
         }
+        anim.addCompletion { _ in
+            swap()
+            done()
+        }
+        anim.startAnimation()
     }
 
     /// 탭 막대 모양 → 막대. from 은 탭 막대 캡슐 자리, searchFrom 은 탭 막대 검색 자리 (이 막대 좌표)
     func morphFromTabs(from: CGRect, searchFrom: CGRect?) {
-        let b = bubbleView
-        bubble = b
-        bringSubviewToFront(b)
-        b.alpha = 1
-        let searchHome = searchButton.frame
-        place(b, from)
+        morphingShape = true
+        let capsuleHome = capsule.frame, searchHome = searchButton.frame
+        setCapsule(from)
         if let searchFrom { searchButton.frame = searchFrom }
-        libraryButton.alpha = 0
         segments.alpha = 0
-        capsule.alpha = 0
-        let anim = UIViewPropertyAnimator(duration: 0.34, dampingRatio: 0.86) {
-            self.place(b, self.circleFrame)
+        let anim = UIViewPropertyAnimator(duration: 0.32, dampingRatio: 0.9) {
+            self.setCapsule(capsuleHome)
             self.searchButton.frame = searchHome
         }
-        // 동그라미로 거의 다 줄어들 즈음 년·월·전체가 나타남
-        anim.addAnimations({
-            self.segments.alpha = 1
-            self.capsule.alpha = 1
-        }, delayFactor: 0.35)
+        // 거의 다 줄어들 즈음 년·월·전체가 나타남
+        anim.addAnimations({ self.segments.alpha = 1 }, delayFactor: 0.4)
         anim.addCompletion { [weak self] _ in self?.endMorph() }
         anim.startAnimation()
     }
 
     /// 바뀌는 중 모양을 지우고 평소대로
     func endMorph() {
-        bubble = nil
-        place(bubbleView, circleFrame)
-        bubbleView.alpha = 0.011
-        libraryButton.alpha = 1
+        morphingShape = false
         segments.alpha = 1
-        capsule.alpha = 1
+        setNeedsLayout()
     }
 
     /// 아이패드: 보관함·검색 단추 없이 [년 | 월 | 모든 사진]만 (순정)
@@ -283,6 +227,7 @@ final class LibraryModeBar: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if morphingShape { return }   // 모양이 바뀌는 중에는 애니메이션이 정한 자리 그대로
         // 순정 배치: 왼쪽 큰 캡슐(보관함 아이콘 + 년|월|전체), 오른쪽 둥근 검색
         let height = bounds.height
         if segmentsOnly {
@@ -298,8 +243,6 @@ final class LibraryModeBar: UIView {
         libraryButton.frame = CGRect(x: 6, y: 4, width: height - 8, height: height - 8)
         let segmentX = libraryButton.frame.maxX + 6
         segments.frame = CGRect(x: segmentX, y: 8, width: capsuleWidth - segmentX - 8, height: height - 16)
-        // 바뀌는 중이 아니면 유리 동그라미를 사진 아이콘 자리에 미리 둠 (이미 그려진 상태로 기다리게)
-        if bubble == nil { place(bubbleView, circleFrame) }
     }
 }
 

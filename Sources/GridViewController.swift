@@ -1059,6 +1059,19 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 칸 수를 바꾸는 중에는 건드리지 않음 (탭 막대를 숨기고 보이면 화면 전체가 다시 배치돼 1000칸 넘게 다시 그림)
         // 끝나면 commitPinch 가 다시 부름
         if isPinching { return }
+        // 아이폰: 시스템 탭 막대가 알아서 줄고 펴짐. 우리 막대는 안 씀 (고르는 중에만 탭 막대를 숨김)
+        if usesNativeModeBar {
+            if !modeBar.isHidden { modeBar.isHidden = true }
+            if accessorySegments.selectedSegmentIndex != modeBar.mode.rawValue {
+                accessorySegments.selectedSegmentIndex = modeBar.mode.rawValue
+            }
+            if #available(iOS 18.0, *), let tabs = tabBarController,
+               navigationController?.topViewController === self, tabs.isTabBarHidden != selecting {
+                tabs.setTabBarHidden(selecting, animated: true)
+                if isRoot { layoutTitleOverlay() }
+            }
+            return
+        }
         // 고르는 중에는 둘 다 숨기고 선택 막대만 (순정)
         let show = modeBarVisible && !selecting
         modeBar.segmentsOnly = traitCollection.isWide
@@ -1228,22 +1241,26 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     @available(iOS 18.0, *)
     private func morphToTabs(_ tabs: UITabBarController) {
         morphing = true
-        // 탭 막대를 투명하게 미리 놓아 캡슐 자리를 잼
+        // 탭 막대를 제자리에 거의 투명하게 미리 놓음. 유리는 처음 보일 때 하얗게 떴다 맑아지는데(0.07초쯤),
+        // 그걸 늘어나는 동안 안 보이게 끝내 두고, 바꿔 끼울 때는 이미 맑은 유리가 나오게
         tabs.setTabBarHidden(false, animated: false)
-        tabs.tabBar.alpha = 0
         tabs.tabBar.layoutIfNeeded()
         let shapes = tabShapes(tabs)
+        // 투명도로 숨기면 유리가 하얗게 떠 보임. 대신 1pt 만 남기고 가려 두어 유리가 미리 그려져 있게
+        let peek = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        peek.backgroundColor = .black
+        tabs.tabBar.mask = peek
         modeBar.morphToTabs(target: shapes.capsule, searchTarget: shapes.search, swap: { [weak self] in
-            // 거의 같은 자리·모양이 됐을 때 진짜 탭 막대로 겹쳐 바꿈
-            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut]) {
-                tabs.tabBar.alpha = 1
-                self?.modeBar.alpha = 0
-            }
+            // 같은 자리·모양이 된 그 프레임에 통째로 바꿔 끼움 (겹쳐 흐리게 바꾸면 둘 다 비쳐 깜빡임)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            tabs.tabBar.mask = nil
+            self?.modeBar.isHidden = true
+            CATransaction.commit()
         }, done: { [weak self] in
             guard let self else { return }
-            tabs.tabBar.alpha = 1
+            tabs.tabBar.mask = nil
             self.modeBar.isHidden = true
-            self.modeBar.alpha = 1
             self.modeBar.endMorph()
             self.modeBar.setNeedsLayout()
             self.morphing = false
@@ -1259,12 +1276,13 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         layoutModeBarFrame()
         modeBar.layoutIfNeeded()
         let shapes = tabShapes(tabs)
+        // 같은 모양의 동그라미를 그 자리에 놓은 그 프레임에 진짜 탭 막대를 뺌 (흐리게 빼면 깜빡임)
+        // 같은 모양의 캡슐을 그 자리에 놓은 그 프레임에 진짜 탭 막대를 뺌
         modeBar.morphFromTabs(from: shapes.capsule, searchFrom: shapes.search)
-        // 진짜 탭 막대는 곧바로 빼고 (같은 모양의 동그라미가 그 자리에서 줄어듦)
-        UIView.animate(withDuration: 0.1, animations: { tabs.tabBar.alpha = 0 }, completion: { _ in
-            tabs.setTabBarHidden(true, animated: false)
-            tabs.tabBar.alpha = 1
-        })
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        tabs.setTabBarHidden(true, animated: false)
+        CATransaction.commit()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.36) { [weak self] in
             guard let self else { return }
             self.morphing = false
@@ -1399,6 +1417,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         guard isRoot, scrollView === collectionView else { return }
+        trackScrollForAccessory()
         updateModeBar()
         updateYearChip()
         let text = overlaySubtitle()
@@ -1434,13 +1453,104 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if zoomCollapsed { setZoomCollapsed(false) }
         // 선택 중이 아니면 아래 막대는 숨기고 탭 막대는 보이게 (어긋난 채로 남지 않게. 맞으면 건드리지 않음)
         if !selecting { navigationController?.ensureBrowsingBars(of: self) }
+        installNativeModeBar()
         updateModeBar()
+    }
+
+    // MARK: 아이폰 [년 | 월 | 전체] — 순정처럼 시스템 탭 막대 최소화 + 아래 액세서리
+    // 위로(옛 사진 쪽) 스크롤하면 시스템이 탭 막대를 사진 아이콘 동그라미로 줄이고 그 옆에 [년 | 월 | 전체] 를 붙임.
+    // 동그라미를 누르면 그 자리에서 탭 막대로 펴지고, 다시 스크롤하면 또 줄어듦. 모양이 바뀌는 건 시스템이 그림
+
+    private var usesNativeModeBar: Bool {
+        if #available(iOS 26.0, *) { return folder.id == "all" && !traitCollection.isWide }
+        return false
+    }
+
+    private lazy var accessorySegments: UISegmentedControl = {
+        let s = UISegmentedControl(items: ["년", "월", "전체"])
+        s.selectedSegmentIndex = LibraryMode.all.rawValue
+        s.addAction(UIAction { [weak self, weak s] _ in
+            guard let self, let s, let mode = LibraryMode(rawValue: s.selectedSegmentIndex) else { return }
+            self.setLibraryMode(mode)
+        }, for: .valueChanged)
+        return s
+    }()
+
+    private var nativeAccessory: AnyObject?
+
+    /// 탭 막대가 동그라미로 줄어 [년 | 월 | 전체] 가 옆에 붙어 있는 상태
+    var tabBarIsMinimized: Bool {
+        if #available(iOS 26.0, *), nativeAccessory != nil {
+            return accessorySegments.traitCollection.tabAccessoryEnvironment == .inline
+        }
+        return false
+    }
+
+    private func installNativeModeBar() {
+        guard usesNativeModeBar, #available(iOS 26.0, *), let tabs = tabBarController,
+              navigationController?.viewControllers.first === self else { return }
+        tabs.tabBarMinimizeBehavior = .onScrollUp
+        if nativeAccessory == nil {
+            let holder = UIView()
+            accessorySegments.translatesAutoresizingMaskIntoConstraints = false
+            holder.addSubview(accessorySegments)
+            NSLayoutConstraint.activate([
+                accessorySegments.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: 6),
+                accessorySegments.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -6),
+                accessorySegments.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
+            ])
+            nativeAccessory = UITabAccessory(contentView: holder)
+            // 탭 막대가 펴지면(맨 아래 도착·동그라미 누름) [년 | 월 | 전체] 를 뺌. 순정은 펴진 탭 막대 위에 따로 막대가 없음
+            holder.registerForTraitChanges([UITraitTabAccessoryEnvironment.self]) { [weak self] (view: UIView, _: UITraitCollection) in
+                guard let self, view.traitCollection.tabAccessoryEnvironment == .regular,
+                      !self.accessoryAlwaysNeeded else { return }
+                self.showAccessory(false)
+            }
+        }
+        // 처음(맨 아래)엔 펴진 탭 막대만. 위로 스크롤해 줄어들 때 붙임
+        showAccessory(accessoryAlwaysNeeded || tabBarIsMinimized)
+    }
+
+    /// 한 화면에 다 들어와 스크롤할 수 없으면 탭 막대가 줄어들 일이 없음 → [년 | 월 | 전체] 를 늘 둠 (안 그러면 갈 길이 없음)
+    private var accessoryAlwaysNeeded: Bool {
+        guard collectionView != nil else { return false }
+        if moments != nil { return true }
+        return collectionView.contentSize.height <= collectionView.bounds.height - collectionView.adjustedContentInset.bottom
+    }
+
+    private func showAccessory(_ on: Bool) {
+        guard #available(iOS 26.0, *), let tabs = tabBarController,
+              let accessory = nativeAccessory as? UITabAccessory else { return }
+        let want: UITabAccessory? = on ? accessory : nil
+        if tabs.bottomAccessory !== want { tabs.setBottomAccessory(want, animated: true) }
+    }
+
+    private var lastOffsetForAccessory: CGFloat = 0
+
+    /// 위로(옛 사진 쪽) 스크롤하기 시작하면 붙여 둠 → 시스템이 탭 막대를 줄이며 옆에 붙임
+    private func trackScrollForAccessory() {
+        guard usesNativeModeBar, nativeAccessory != nil, collectionView.isTracking || collectionView.isDecelerating else {
+            lastOffsetForAccessory = collectionView?.contentOffset.y ?? 0
+            return
+        }
+        let y = collectionView.contentOffset.y
+        if y < lastOffsetForAccessory - 2 { showAccessory(true) }
+        lastOffsetForAccessory = y
+    }
+
+    /// 다른 탭으로 가면 그 탭에는 [년 | 월 | 전체] 가 없고 탭 막대도 줄어들지 않음
+    private func removeNativeModeBarIfLeavingTab() {
+        guard usesNativeModeBar, #available(iOS 26.0, *), let tabs = tabBarController,
+              let nav = navigationController, tabs.selectedViewController !== nav else { return }
+        tabs.tabBarMinimizeBehavior = .never
+        tabs.setBottomAccessory(nil, animated: false)
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         // 칸 수를 바꾸던 중이면 가까운 칸 수로 바로 마침
         finishPinchNow()
+        removeNativeModeBarIfLeavingTab()
         holdReloadsDuringTransition()
         navigationController?.setBackSwipe(blocked: nil, by: self)
         // 선택 모드인 채로 닫히면(앨범이 지워짐 등) 뒤 화면에 막힌 채로 남지 않게

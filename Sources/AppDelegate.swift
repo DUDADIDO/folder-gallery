@@ -91,7 +91,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UITabBarControlle
     func tabBarController(_ tabBarController: UITabBarController, shouldSelect viewController: UIViewController) -> Bool {
         if viewController === tabBarController.selectedViewController,
            let nav = viewController as? UINavigationController, nav.viewControllers.count == 1,
-           let grid = nav.topViewController as? GridViewController {
+           let grid = nav.topViewController as? GridViewController, !grid.tabBarIsMinimized {
+            // 줄어든 탭 막대(사진 아이콘 동그라미)를 누르면 그 자리에서 펴지기만 함 (순정)
             grid.scrollToLatest(animated: true)
         }
         return true
