@@ -929,7 +929,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 순정 iOS 27: 년·월 보기이거나, 보관함을 스크롤해 최신 끝에서 떨어져 있으면 [년 | 월 | 전체].
     /// 최신 끝에 닿으면 탭 막대로 돌아감
     private var modeBarVisible: Bool {
-        guard folder.id == "all", !selecting, collectionView != nil else { return false }
+        guard folder.id == "all", !selecting, !tabsRequested, collectionView != nil else { return false }
         if moments != nil { return true }
         guard !list.isEmpty else { return false }
         // 아이패드는 늘 아래 가운데에 (탭 막대가 위에 있어서 서로 비킬 필요 없음)
@@ -1170,14 +1170,21 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     /// 아래 막대의 보관함 아이콘 → 보통 칸으로 돌아가고 탭 막대가 다시 보임
-    /// [년 | 월 | 전체] 옆 사진 아이콘 (순정): 모든 사진·보통 칸으로 돌아가 최신(맨 아래)으로 가고, 탭 막대가 다시 나옴
+    /// [년 | 월 | 전체] 옆 사진 아이콘 (순정 iOS 27): 보던 자리 그대로 막대만 탭 막대로 바뀜.
+    /// 다시 손으로 스크롤하면 [년 | 월 | 전체] 가 돌아옴
     private func leaveDense() {
-        setLibraryMode(.all)
-        if PhotoGridLayout.isCompact(columns) {
-            setColumnsDirectly(5)   // 최신 끝으로 감
-        } else {
-            scrollToLatest(animated: true)
-        }
+        // 년·월 보기는 그 화면 스크롤을 여기서 못 잡으니 모든 사진으로 먼저
+        if moments != nil { setLibraryMode(.all) }
+        tabsRequested = true
+        updateModeBar()
+    }
+
+    /// 사진 아이콘을 눌러 탭 막대를 불러낸 상태 (다음 손 스크롤까지)
+    private var tabsRequested = false
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        guard tabsRequested else { return }
+        tabsRequested = false
         updateModeBar()
     }
 
