@@ -33,7 +33,7 @@ final class AssetCell: UICollectionViewCell {
 
     /// 크기는 배치(PhotoGridLayout)가 정함. 셀마다 오토레이아웃으로 크기를 재지 않게 (칸이 1000개 넘으면 이게 제일 느렸음)
     override func preferredLayoutAttributesFitting(_ layoutAttributes: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
-        super.preferredLayoutAttributesFitting(layoutAttributes)
+        layoutAttributes
     }
 
     override init(frame: CGRect) {
@@ -62,7 +62,6 @@ final class AssetCell: UICollectionViewCell {
         durationLabel.layer.shadowOpacity = 0.8
         durationLabel.layer.shadowRadius = 2
         durationLabel.layer.shadowOffset = .zero
-        durationLabel.translatesAutoresizingMaskIntoConstraints = false
         thumbView.addSubview(durationLabel)
 
         heart.tintColor = .white
@@ -71,24 +70,15 @@ final class AssetCell: UICollectionViewCell {
         heart.layer.shadowRadius = 2
         heart.layer.shadowOffset = .zero
         heart.isHidden = true
-        heart.translatesAutoresizingMaskIntoConstraints = false
         thumbView.addSubview(heart)
 
-        badge.translatesAutoresizingMaskIntoConstraints = false
         badge.isHidden = true
         contentView.addSubview(badge)
 
-        NSLayoutConstraint.activate([
-            durationLabel.trailingAnchor.constraint(equalTo: thumbView.trailingAnchor, constant: -5),
-            durationLabel.bottomAnchor.constraint(equalTo: thumbView.bottomAnchor, constant: -4),
-            heart.leadingAnchor.constraint(equalTo: thumbView.leadingAnchor, constant: 5),
-            heart.bottomAnchor.constraint(equalTo: thumbView.bottomAnchor, constant: -5),
-            // 순정처럼 오른쪽 아래
-            badge.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
-            badge.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -4),
-            badge.widthAnchor.constraint(equalToConstant: 22),
-            badge.heightAnchor.constraint(equalToConstant: 22),
-        ])
+        // 오토레이아웃 없이 layoutSubviews 에서 직접 놓음 (칸이 수천 개라 제약 계산이 스크롤을 느리게 했음)
+        insetsLayoutMarginsFromSafeArea = false
+        contentView.insetsLayoutMarginsFromSafeArea = false
+        heart.sizeToFit()
     }
 
     required init?(coder: NSCoder) {
@@ -103,6 +93,17 @@ final class AssetCell: UICollectionViewCell {
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         if thumbView.bounds != size { thumbView.bounds = size }
         if thumbView.center != center { thumbView.center = center }
+        // 길이(오른쪽 아래)·하트(왼쪽 아래)·체크(오른쪽 아래, 순정)
+        if durationLabel.text != nil {
+            let fit = durationLabel.sizeThatFits(CGSize(width: 200, height: 40))
+            durationLabel.frame = CGRect(x: size.width - 5 - fit.width, y: size.height - 4 - fit.height, width: fit.width, height: fit.height)
+        }
+        if !heart.isHidden {
+            heart.frame.origin = CGPoint(x: 5, y: size.height - 5 - heart.bounds.height)
+        }
+        if !badge.isHidden {
+            badge.frame = CGRect(x: bounds.width - 26, y: bounds.height - 26, width: 22, height: 22)
+        }
     }
 
     override func prepareForReuse() {
@@ -122,6 +123,7 @@ final class AssetCell: UICollectionViewCell {
     }
 
     func setFavorite(_ on: Bool) {
+        if heart.isHidden == on { setNeedsLayout() }
         heart.isHidden = !on
     }
 
@@ -130,6 +132,7 @@ final class AssetCell: UICollectionViewCell {
             durationLabel.text = nil
             return
         }
+        setNeedsLayout()
         let total = Int(seconds.rounded())
         let h = total / 3600, m = (total % 3600) / 60, s = total % 60
         durationLabel.text = h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
@@ -140,6 +143,7 @@ final class AssetCell: UICollectionViewCell {
         let on = selecting && isSelected
         dim.isHidden = !on
         badge.isHidden = !on
+        if on { setNeedsLayout() }
         // 순정: 고른 비디오는 길이 대신 체크만
         durationLabel.alpha = on ? 0 : 1
         guard on else { return }
@@ -272,7 +276,12 @@ final class HeroHeaderView: UICollectionReusableView {
 /// 1칸은 사진마다 원래 비율로 화면 너비를 꽉 채움. 묶음마다 맨 위에 머리글(날짜) 또는 정사각형 앨범 표지
 final class PhotoGridLayout: UICollectionViewLayout {
     /// 보관함을 끝까지 오므린 칸 수
-    static let denseColumns = 25
+    /// 끝까지 오므린 칸 수 (순정 iOS 27 아이폰: 3 · 5 · 15 · 31칸)
+    static let denseColumns = 31
+    /// 이 칸 수부터는 촘촘한 칸: 사진 사이 틈 없음, 하트·길이 없음, 작은 썸네일 (순정 15·31칸)
+    static let compactColumns = 15
+
+    static func isCompact(_ columns: Int) -> Bool { columns >= compactColumns }
     /// 앨범 표지 높이 ÷ 화면 너비 (순정 iOS 27 앨범 화면: iPhone 14 Pro 393pt 너비에 약 480pt)
     static let coverRatio: CGFloat = 1.22
     /// 칸 크기를 바꾸는 중인 상태: columns 배치의 사진 줄(높이·사이)을 scale 배로. 머리글 높이는 그대로
@@ -292,6 +301,8 @@ final class PhotoGridLayout: UICollectionViewLayout {
         let width: CGFloat
         let side: CGFloat
         let header: CGFloat
+        /// 사진 사이 간격 (촘촘한 칸은 0)
+        let spacing: CGFloat
         /// 묶음마다 맨 위(머리글 위). 마지막에 전체 높이가 하나 더 있음
         var tops: [CGFloat] = []
         /// 1칸일 때만: 사진(평평한 차례)마다 위·높이
@@ -355,13 +366,13 @@ final class PhotoGridLayout: UICollectionViewLayout {
             cachedOriginX = originX
         }
         if let cached = cache[columns] { return cached }
-        let spacing = PhotoGridLayout.spacing
         let perRow = max(1, columns)
+        let spacing = PhotoGridLayout.isCompact(perRow) ? 0 : PhotoGridLayout.spacing
         // 칸 너비는 나눈 값 그대로 (내림하면 25칸에서 오른쪽에 20pt 가까이 빔). 자리는 itemFrame 에서 화소에 맞춤
-        let side = perRow == 1 ? width : max(perRow >= PhotoGridLayout.denseColumns ? 8 : 20,
+        let side = perRow == 1 ? width : max(PhotoGridLayout.isCompact(perRow) ? 8 : 20,
                                              (width - spacing * CGFloat(perRow - 1)) / CGFloat(perRow))
         let header = headerHeight ?? (width * PhotoGridLayout.coverRatio).rounded()
-        var geometry = Geometry(columns: perRow, x: originX, width: width, side: side, header: header)
+        var geometry = Geometry(columns: perRow, x: originX, width: width, side: side, header: header, spacing: spacing)
         geometry.tops.reserveCapacity(counts.count + 1)
         var y: CGFloat = 0
         if perRow == 1 {
@@ -462,7 +473,7 @@ final class PhotoGridLayout: UICollectionViewLayout {
             let flat = starts[section] + item
             return CGRect(x: geometry.x, y: geometry.itemTops[flat], width: geometry.width, height: geometry.itemHeights[flat])
         }
-        let step = geometry.side + PhotoGridLayout.spacing
+        let step = geometry.side + geometry.spacing
         let row = item / geometry.columns, column = item % geometry.columns
         // 칸 끝을 화소에 맞춤 (칸마다 1화소쯤 다를 수 있지만 사이 간격은 같고 오른쪽 끝까지 꽉 참)
         let minX = pixel(geometry.x + CGFloat(column) * step)
@@ -493,7 +504,7 @@ final class PhotoGridLayout: UICollectionViewLayout {
             if geometry.tops[mid + 1] > rect.minY { high = mid } else { low = mid + 1 }
         }
         var section = low
-        let step = geometry.side + PhotoGridLayout.spacing
+        let step = geometry.side + geometry.spacing
         while section < sectionCount && geometry.tops[section] < rect.maxY {
             if headerFrame(section: section, geometry).intersects(rect) { headers.append(section) }
             let count = counts[section]
@@ -741,11 +752,14 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         self.folder = folder
         self.isRoot = isRoot
         // 보관함은 순정처럼 끝까지 오므리면 아주 촘촘한 칸(그때 아래에 [년 | 월 | 전체])
-        levels = folder.id == "all" ? [1, 3, 5, 7, PhotoGridLayout.denseColumns] : (isRoot ? [1, 3, 5, 7] : [1, 3, 5])
+        levels = folder.id == "all" ? [1, 3, 5, PhotoGridLayout.compactColumns, PhotoGridLayout.denseColumns]
+            : (isRoot ? [1, 3, 5, 7] : [1, 3, 5])
         super.init(nibName: nil, bundle: nil)
         // 앨범 안에서도 순정처럼 아래 탭 막대를 그대로 둠 (닫히는 확대 전환 끝에서 화면이 덜컥이지 않게)
         var saved = isRoot ? Prefs.gridColumns : Prefs.albumGridColumns
         if saved == 4 { saved = 3 }   // 예전의 4칸은 3칸으로
+        if folder.id == "all" && saved == 7 { saved = 5 }   // 예전 보관함의 7칸·25칸은 순정 칸 수로
+        if folder.id == "all" && saved == 25 { saved = PhotoGridLayout.denseColumns }
         // 순정 iOS 27 은 보관함·앨범 모두 3칸이 기본
         columns = levels.contains(saved) ? saved : 3
     }
@@ -872,7 +886,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if moments != nil { return true }
         guard !list.isEmpty else { return false }
         // 한 화면에 다 들어와 스크롤할 수 없으면 끝까지 오므렸을 때 늘 보이게 (안 그러면 년·월로 갈 길이 없음)
-        if columns == PhotoGridLayout.denseColumns,
+        if PhotoGridLayout.isCompact(columns),
            collectionView.contentSize.height <= collectionView.bounds.height - collectionView.adjustedContentInset.bottom { return true }
         let inset = collectionView.adjustedContentInset
         let maxOffset = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
@@ -902,7 +916,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     private func updateBoundaryChips() {
         guard folder.id == "all", collectionView != nil else { return }
-        let dense = columns == PhotoGridLayout.denseColumns && moments == nil && !list.isEmpty
+        let dense = PhotoGridLayout.isCompact(columns) && moments == nil && !list.isEmpty
         guard dense else {
             boundaryChips.values.forEach { $0.removeFromSuperview() }
             boundaryChips.removeAll()
@@ -972,7 +986,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         updateBoundaryChips()
         guard folder.id == "all", collectionView != nil else { return }
         // 한 화면에 다 들어오면(아래에 붙은 짧은 목록) 칩 없이
-        let show = columns == PhotoGridLayout.denseColumns && moments == nil && !list.isEmpty
+        let show = PhotoGridLayout.isCompact(columns) && moments == nil && !list.isEmpty
             && collectionView.contentInset.top < 1
         yearChip.isHidden = !show
         guard show else { return }
@@ -1008,8 +1022,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if show {
             let height: CGFloat = 56
             let bottom = view.bounds.height - max(view.safeAreaInsets.bottom, 20) - 4
-            modeBar.frame = CGRect(x: 16, y: bottom - height, width: view.bounds.width - 32, height: height)
-            view.bringSubviewToFront(modeBar)
+            let frame = CGRect(x: 16, y: bottom - height, width: view.bounds.width - 32, height: height)
+            if modeBar.frame != frame { modeBar.frame = frame }
+            if view.subviews.last !== modeBar { view.bringSubviewToFront(modeBar) }
         }
     }
 
@@ -1101,7 +1116,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let anchor = collectionView.indexPathsForVisibleItems.sorted().dropFirst(collectionView.indexPathsForVisibleItems.count / 2).first
             .map { list[flatIndex($0)].localIdentifier }
         setLibraryMode(.all)
-        setColumnsDirectly(7)
+        setColumnsDirectly(5)
         if let anchor { reveal(assetID: anchor) }
         updateModeBar()
     }
@@ -1168,7 +1183,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let y = offset + inset.top + 4
         let width = collectionView.bounds.width
         var dates: [Date] = []
-        for x in stride(from: CGFloat(4), to: width, by: max(8, width / CGFloat(max(1, columns)))) {
+        for x in stride(from: CGFloat(4), to: width, by: max(width / 8, width / CGFloat(max(1, columns)))) {   // 많아야 8곳만 (매 프레임 부름)
             if let path = collectionView.indexPathForItem(at: CGPoint(x: x, y: y)),
                let date = list[flatIndex(path)].creationDate { dates.append(date) }
         }
@@ -1228,10 +1243,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 썸네일을 받을 크기: 지금 칸 수의 한 칸 (1칸이면 화면 너비). 칸 수가 정해질 때만 바뀜 (손가락을 움직이는 동안은 그대로)
     private func updateThumbSize() {
         // 촘촘한 칸(1000칸 넘게 보임)에서는 셀 미리 만들기를 끔: 안 보이는 칸을 1000개 더 만들고 그 그림까지 받느라 느려짐
-        if collectionView != nil { collectionView.isPrefetchingEnabled = columns < PhotoGridLayout.denseColumns }
+        if collectionView != nil { collectionView.isPrefetchingEnabled = !PhotoGridLayout.isCompact(columns) }
         let scale = traitCollection.displayScale
         // 촘촘한 칸은 한 변 16pt 남짓이라 작게 (큰 그림을 받아 줄이는 일을 줄임)
-        thumbSize = columns >= PhotoGridLayout.denseColumns ? denseThumbSize
+        thumbSize = PhotoGridLayout.isCompact(columns) ? compactThumbSize(columns)
             : CGSize(width: max(40, view.bounds.width / CGFloat(columns)) * scale, height: max(40, view.bounds.width / CGFloat(columns)) * scale)
         warmDenseCache()
     }
@@ -1750,7 +1765,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             } else {
                 Prefs.albumGridColumns = columns
             }
-            if newColumns != PhotoGridLayout.denseColumns {
+            if !PhotoGridLayout.isCompact(newColumns) {
                 Thumbs.manager.stopCachingImagesForAllAssets()
                 warmedAround = nil
             }
@@ -2105,22 +2120,26 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 지금 칸 수에 맞는 크기로 썸네일을 받음 (받는 동안은 지금 그림을 그대로 둠)
     private func loadThumbnail(into cell: AssetCell, asset: PHAsset) {
         let id = asset.localIdentifier
-        if isDense, let ready = DenseThumbs.shared.image(for: id) {
+        if isDense {
             if cell.requestID != PHInvalidImageRequestID {
                 Thumbs.manager.cancelImageRequest(cell.requestID)
                 cell.requestID = PHInvalidImageRequestID
             }
-            cell.imageView.image = ready
-            return
+            if let ready = DenseThumbs.shared.image(for: id, size: thumbSize) {
+                cell.imageView.image = ready
+                return
+            }
         }
         if cell.requestID != PHInvalidImageRequestID {
             Thumbs.manager.cancelImageRequest(cell.requestID)
         }
-        cell.requestID = Thumbs.manager.requestImage(for: asset, targetSize: thumbSize, contentMode: .aspectFill,
+        let size = thumbSize, compact = isDense
+        cell.requestID = Thumbs.manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill,
                                                      options: Thumbs.options) { [weak cell] image, info in
+            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            if compact, !degraded, let image { DenseThumbs.shared.remember(image, id: id, size: size) }
             guard let cell, cell.assetID == id, let image else { return }
             // 먼저 오는 흐린 그림이 이미 있는 더 선명한 그림을 덮지 않게
-            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
             if degraded, let current = cell.imageView.image,
                current.size.width * current.scale >= image.size.width * image.scale { return }
             cell.imageView.image = image
@@ -2209,9 +2228,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
     }
 
-    /// 끝까지 오므린 칸의 썸네일 크기 (미리 받아 두는 것과 똑같아야 캐시에서 바로 나옴)
-    private var denseThumbSize: CGSize {
-        let side = 20 * traitCollection.displayScale
+    /// 촘촘한 칸의 썸네일 크기 (미리 받아 두는 것과 똑같아야 바로 나옴)
+    private func compactThumbSize(_ columns: Int) -> CGSize {
+        let width = view.bounds.width > 0 ? view.bounds.width : 393
+        let side = (width / CGFloat(columns) * traitCollection.displayScale).rounded(.up)
         return CGSize(width: side, height: side)
     }
 
@@ -2219,26 +2239,32 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 오므리는 순간 1000장 넘게 한꺼번에 요청하느라 칸이 늦게 차던 것을 줄임 (순정은 0.9초 안에 다 참)
     private var warmedAround: Int?
     private func warmDenseCache() {
-        guard folder.id == "all", collectionView != nil, levels.count >= 2, !list.isEmpty,
-              columns == levels[levels.count - 2], levels.last == PhotoGridLayout.denseColumns else { return }
+        guard folder.id == "all", collectionView != nil, !list.isEmpty, let index = levels.firstIndex(of: columns) else { return }
+        // 오므리거나 펼쳤을 때 갈 촘촘한 칸 수 (5칸 → 15칸, 15칸 ↔ 31칸)
+        let targets = [index + 1, index - 1].filter { levels.indices.contains($0) }.map { levels[$0] }
+            .filter { PhotoGridLayout.isCompact($0) }
+        guard !targets.isEmpty else { return }
         let paths = collectionView.indexPathsForVisibleItems
         guard let center = paths.map(flatIndex).sorted().dropFirst(paths.count / 2).first else { return }
         // 조금 움직인 정도면 다시 하지 않음
         if let last = warmedAround, abs(last - center) < 300 { return }
         warmedAround = center
-        DenseThumbs.shared.warm(warmAssets(around: center), size: denseThumbSize)
+        // 그 칸 수 화면 한 장보다 조금 넓게
+        DenseThumbs.shared.warm(targets.flatMap { next in
+            warmAssets(around: center, span: next * 60).map { ($0, compactThumbSize(next)) }
+        })
     }
 
-    private func warmAssets(around center: Int) -> [PHAsset] {
-        // 촘촘한 화면 한 장(약 25 × 50칸)보다 조금 넓게. 가까운 것부터
-        let lower = max(0, center - 900), upper = min(list.count, center + 900)
+    private func warmAssets(around center: Int, span: Int) -> [PHAsset] {
+        // 가까운 것부터
+        let lower = max(0, center - span / 2), upper = min(list.count, center + span / 2)
         guard lower < upper else { return [] }
         return (lower..<upper).sorted { abs($0 - center) < abs($1 - center) }.map { list[$0] }
     }
 
     /// 보관함을 끝까지 오므린 상태 (칸 수를 바꾸는 중에 그 배치를 그리는 때도)
     private var isDense: Bool {
-        (gridLayout.zoom?.columns ?? columns) >= PhotoGridLayout.denseColumns
+        PhotoGridLayout.isCompact(gridLayout.zoom?.columns ?? columns)
     }
 
     func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
@@ -3183,6 +3209,7 @@ final class DenseThumbs {
     private var pending = Set<String>()
     private let limit = 4000   // 60×60 화소 × 4000장 ≈ 55MB 이하
     private let manager = PHImageManager.default()
+
     private let options: PHImageRequestOptions = {
         let options = PHImageRequestOptions()
         options.deliveryMode = .highQualityFormat   // 한 번만 옴
@@ -3196,18 +3223,18 @@ final class DenseThumbs {
                                                queue: .main) { [weak self] _ in self?.clear() }
     }
 
-    func image(for id: String) -> UIImage? { images[id] }
+    func image(for id: String, size: CGSize) -> UIImage? { images[key(id, size)] }
 
-    private var queue: [PHAsset] = []
-    private var size = CGSize.zero
+    private func key(_ id: String, _ size: CGSize) -> String { "\(Int(size.width))|\(id)" }
+
+    private var queue: [(PHAsset, CGSize)] = []
     private var generation = 0
 
     /// 없는 것만 받음 (메인 스레드에서 부름). 지금 화면의 썸네일이 먼저 오게 조금 기다렸다가, 조금씩 나눠서
-    func warm(_ assets: [PHAsset], size: CGSize) {
+    func warm(_ items: [(PHAsset, CGSize)]) {
         generation += 1
         let mine = generation
-        queue = assets
-        self.size = size
+        queue = items
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.drain(mine) }
     }
 
@@ -3215,7 +3242,7 @@ final class DenseThumbs {
         guard mine == generation, !queue.isEmpty else { return }
         let batch = queue.prefix(150)
         queue.removeFirst(batch.count)
-        request(Array(batch), size: size)
+        request(Array(batch))
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in self?.drain(mine) }
     }
 
@@ -3225,9 +3252,14 @@ final class DenseThumbs {
         queue.removeAll()
     }
 
-    private func request(_ assets: [PHAsset], size: CGSize) {
-        for asset in assets {
-            let id = asset.localIdentifier
+    /// 셀이 직접 받은 촘촘한 칸 그림도 들고 있음 (다시 오면 바로)
+    func remember(_ image: UIImage, id: String, size: CGSize) {
+        store(image, for: key(id, size))
+    }
+
+    private func request(_ items: [(PHAsset, CGSize)]) {
+        for (asset, size) in items {
+            let id = key(asset.localIdentifier, size)
             guard images[id] == nil, !pending.contains(id) else { continue }
             pending.insert(id)
             manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: options) { [weak self] image, _ in
