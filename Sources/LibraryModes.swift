@@ -284,6 +284,40 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
         }
     }
 
+    /// 화면 가운데에 가장 가까운 카드 (년·월 어느 쪽이든)
+    func centerCard() -> (id: String, frame: CGRect, cell: MomentCell)? {
+        guard isViewLoaded else { return nil }
+        collectionView.layoutIfNeeded()
+        let mid = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        return collectionView.visibleCells.compactMap { cell -> (String, CGRect, MomentCell)? in
+            guard let cell = cell as? MomentCell, let id = cell.assetID else { return nil }
+            return (id, cell.convert(cell.bounds, to: view), cell)
+        }.min { hypot($0.1.midX - mid.x, $0.1.midY - mid.y) < hypot($1.1.midX - mid.x, $1.1.midY - mid.y) }
+            .map { (id: $0.0, frame: $0.1, cell: $0.2) }
+    }
+
+    /// 그 사진(또는 그 날짜)이 들어 있는 카드를 가운데로 놓고 그 칸을 돌려줌
+    func focus(id: String, date: Date) -> MomentCell? {
+        guard isViewLoaded else { return nil }
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        var path: IndexPath?
+        if mode == .years {
+            if let i = data.years.firstIndex(where: { $0.year == c.year }) { path = IndexPath(item: i, section: 0) }
+        } else if let s = monthIndex(year: c.year ?? 0, month: c.month ?? 0) {
+            let days = data.months[s].days
+            let i = days.firstIndex { $0.cover.localIdentifier == id } ?? days.firstIndex { $0.day == c.day } ?? 0
+            path = IndexPath(item: i, section: s)
+        }
+        collectionView.layoutIfNeeded()
+        guard let path, let attributes = collectionView.layoutAttributesForItem(at: path) else { return nil }
+        let inset = collectionView.adjustedContentInset
+        let maxY = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
+        let y = min(maxY, max(-inset.top, attributes.frame.midY - collectionView.bounds.height / 2))
+        collectionView.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+        collectionView.layoutIfNeeded()
+        return collectionView.cellForItem(at: path) as? MomentCell
+    }
+
     /// 그날 칸이 화면 가운데쯤 오게 (없으면 그 달)
     func centerDay(year: Int, month: Int, day: Int) {
         guard mode == .months, let section = monthIndex(year: year, month: month) else { return }

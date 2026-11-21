@@ -862,7 +862,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             titleOverlay.title = folder.title
             if folder.id == "all" {
                 modeBar.isHidden = true
-                modeBar.onMode = { [weak self] mode in self?.setLibraryMode(mode) }
+                modeBar.onMode = { [weak self] mode in self?.switchMode(mode) }
                 modeBar.onLibrary = { [weak self] in self?.leaveDense() }
                 modeBar.onSearch = { [weak self] in self?.presentSearch() }
                 view.addSubview(modeBar)
@@ -1113,7 +1113,74 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
     }
 
-    private func setLibraryMode(_ mode: LibraryMode, month: Int? = nil) {
+    /// [년 | 월 | 전체] 를 누름 (순정): 화면 가운데 사진 한 장이 새 화면의 제자리로 이어지며 모양이 바뀌고,
+    /// 나머지는 0.3초 동안 겹쳐 바뀜
+    private func switchMode(_ mode: LibraryMode) {
+        guard mode != modeBar.mode else { return }
+        // 전체 → 월은 보이던 사진들이 날 칸으로 빨려 들어가는 전용 전환
+        if moments == nil && mode == .months { setLibraryMode(.months); return }
+        // 지금 화면 가운데 사진
+        var anchor: (id: String, frame: CGRect, image: UIImage?, radius: CGFloat)?
+        if let m = moments, let card = m.centerCard() {
+            anchor = (card.id, m.view.convert(card.frame, to: view), card.cell.image, card.cell.contentView.layer.cornerRadius)
+        } else if let tile = visibleGridTiles().first {
+            anchor = (tile.id, tile.frame, tile.image, 0)
+        }
+        let before = view.snapshotView(afterScreenUpdates: false)
+        setLibraryMode(mode) { [weak self] in
+            guard let self else { return }
+            self.morphAnchor(anchor, before: before, to: mode)
+        }
+    }
+
+    private func morphAnchor(_ anchor: (id: String, frame: CGRect, image: UIImage?, radius: CGFloat)?, before: UIView?, to mode: LibraryMode) {
+        // 앞 화면을 위에 얹고 사라지게
+        if let before {
+            before.frame = view.bounds
+            view.insertSubview(before, belowSubview: modeBar)
+            UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut]) {
+                before.alpha = 0
+            } completion: { _ in before.removeFromSuperview() }
+        }
+        guard let anchor, let at = list.index(ofID: anchor.id), let date = list[at].creationDate else { return }
+        // 새 화면에서 그 사진이 갈 자리
+        var target: CGRect?
+        var targetView: UIView?
+        var targetRadius: CGFloat = 0
+        if mode == .all {
+            reveal(assetID: anchor.id)
+            collectionView.layoutIfNeeded()
+            if let path = indexPath(forAssetID: anchor.id), let cell = collectionView.cellForItem(at: path) {
+                target = cell.convert(cell.bounds, to: view)
+                targetView = cell.contentView
+            }
+        } else if let m = moments, let cell = m.focus(id: anchor.id, date: date) {
+            target = cell.convert(cell.bounds, to: view)
+            targetView = cell.contentView
+            targetRadius = cell.contentView.layer.cornerRadius
+            if cell.image == nil { cell.prefill(anchor.image) }
+        }
+        guard let target, let targetView, let image = anchor.image else { return }
+        let flyer = UIImageView(image: image)
+        flyer.contentMode = .scaleAspectFill
+        flyer.clipsToBounds = true
+        flyer.layer.cornerCurve = .continuous
+        flyer.layer.cornerRadius = anchor.radius
+        flyer.frame = anchor.frame
+        view.insertSubview(flyer, belowSubview: modeBar)
+        targetView.alpha = 0
+        let anim = UIViewPropertyAnimator(duration: 0.36, dampingRatio: 0.9) {
+            flyer.frame = target
+            flyer.layer.cornerRadius = targetRadius
+        }
+        anim.addCompletion { _ in
+            targetView.alpha = 1
+            UIView.animate(withDuration: 0.12, animations: { flyer.alpha = 0 }, completion: { _ in flyer.removeFromSuperview() })
+        }
+        anim.startAnimation()
+    }
+
+    private func setLibraryMode(_ mode: LibraryMode, month: Int? = nil, onShown: (() -> Void)? = nil) {
         modeBar.mode = mode
         if mode == .all {
             moments?.willMove(toParent: nil)
@@ -1123,6 +1190,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             titleOverlay.isHidden = false
             navigationItem.rightBarButtonItems?.forEach { $0.isHidden = false }
             updateModeBar()
+            onShown?()
             return
         }
         // 전체에서 월로 (순정): 격자에 보이던 사진이 그날 카드로 빨려 들어감. 지금 보이는 칸을 적어 둠
@@ -1150,6 +1218,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if let data = momentsData, momentsVersion == version {
             child.show(data, mode: mode, scrollToMonth: month)
             if let fromGrid { suckIntoMonths(child, fromGrid) }
+            onShown?()
             return
         }
         let current = list
@@ -1162,6 +1231,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 if self.moments === child {
                     child.show(data, mode: child === self.moments ? self.modeBar.mode : mode, scrollToMonth: month)
                     if let fromGrid { self.suckIntoMonths(child, fromGrid) }
+                    onShown?()
                 }
             }
         }
@@ -1569,7 +1639,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         s.selectedSegmentIndex = LibraryMode.all.rawValue
         s.addAction(UIAction { [weak self, weak s] _ in
             guard let self, let s, let mode = LibraryMode(rawValue: s.selectedSegmentIndex) else { return }
-            self.setLibraryMode(mode)
+            self.switchMode(mode)
         }, for: .valueChanged)
         return s
     }()
