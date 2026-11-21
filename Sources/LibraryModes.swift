@@ -99,7 +99,21 @@ struct MomentsData {
             years.append(Year(year: year, cover: day.cover, coverMonth: months[busiest].month, firstMonthIndex: index))
             index = end
         }
-        return MomentsData(months: months, years: years)
+        // 순정 월 보기 (같은 사진으로 맞춰 봄): 5장 이상 찍은 날만 많아야 4날 (날짜 순).
+        // 그런 날이 없으면 가장 많이 찍은 하루 (같으면 앞날)
+        let shownMonths = months.map { month -> Month in
+            let busy = month.days.filter { $0.count >= 5 }
+            var picked = busy.count > 4
+                ? Array(busy.enumerated().sorted { $0.element.count != $1.element.count ? $0.element.count > $1.element.count : $0.offset < $1.offset }
+                    .prefix(4).map(\.element))
+                : busy
+            if picked.isEmpty, let one = month.days.max(by: { $0.count != $1.count ? $0.count < $1.count : $0.day > $1.day }) {
+                picked = [one]
+            }
+            picked.sort { $0.day < $1.day }
+            return Month(year: month.year, month: month.month, days: picked)
+        }
+        return MomentsData(months: shownMonths, years: years)
     }
 }
 
@@ -409,31 +423,24 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
                     groups.append(row)
                 }
             }
-            if count == 1 {
+            // 순정: 1날 큰 카드 / 2날 반반 / 3날 큰 카드 + 반반 / 4날 큰 카드 + 작은 칸 3
+            let half = floor((full - gap) / 2)
+            func wide() {
                 groups.append(NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute(wideHeight)),
                                                                  subitems: [item(full, wideHeight)]))
-            } else if count == 2 {
-                let half = floor((full - gap) / 2)
-                let pair = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute(half)),
-                                                              subitems: [item(half, half), item(half, half)])
+            }
+            func halves() {
+                let pair = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute((half * 1.36).rounded())),
+                                                              subitems: [item(half, (half * 1.36).rounded()), item(half, (half * 1.36).rounded())])
                 pair.interItemSpacing = .fixed(gap)
                 groups.append(pair)
-            } else if count >= 3 {
-                if section % 2 == 0 {
-                    groups.append(NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute(wideHeight)),
-                                                                     subitems: [item(full, wideHeight)]))
-                    rowsOfThree(count - 1)
-                } else {
-                    let bigSide = side * 2 + gap
-                    let column = NSCollectionLayoutGroup.vertical(layoutSize: .init(widthDimension: .absolute(side), heightDimension: .absolute(bigSide)),
-                                                                  subitems: [item(side, side), item(side, side)])
-                    column.interItemSpacing = .fixed(gap)
-                    let hero = NSCollectionLayoutGroup.horizontal(layoutSize: .init(widthDimension: .absolute(full), heightDimension: .absolute(bigSide)),
-                                                                  subitems: [column, item(bigSide, bigSide)])
-                    hero.interItemSpacing = .fixed(gap)
-                    groups.append(hero)
-                    rowsOfThree(count - 3)
-                }
+            }
+            switch count {
+            case 1: wide()
+            case 2: halves()
+            case 3: wide(); halves()
+            case 0: break
+            default: wide(); rowsOfThree(count - 1)
             }
             let total = groups.reduce(CGFloat(0)) { $0 + $1.layoutSize.heightDimension.dimension } + CGFloat(max(0, groups.count - 1)) * gap
             let whole = NSCollectionLayoutGroup.vertical(layoutSize: .init(widthDimension: .fractionalWidth(1), heightDimension: .absolute(max(1, total))),
