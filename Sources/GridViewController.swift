@@ -1061,6 +1061,18 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if isPinching { return }
         // 아이폰: 시스템 탭 막대가 알아서 줄고 펴짐. 우리 막대는 안 씀 (고르는 중에만 탭 막대를 숨김)
         if usesNativeModeBar {
+            // 년·월 보기나 스크롤할 수 없는 짧은 목록: 시스템 탭 막대가 줄어들 일이 없어 [년 | 월 | 전체] 를 붙이면 두 줄이 됨.
+            // 순정처럼 한 줄(사진 동그라미 + 년·월·전체 + 검색)인 우리 막대를 씀
+            if moments != nil || shortContent || customBarHold {
+                showAccessory(false)
+                if #available(iOS 18.0, *), let tabs = tabBarController,
+                   navigationController?.topViewController === self, !tabs.isTabBarHidden {
+                    tabs.setTabBarHidden(true, animated: false)
+                }
+                if modeBar.isHidden == !selecting { modeBar.isHidden = selecting }
+                if !selecting { layoutModeBarFrame() }
+                return
+            }
             if !modeBar.isHidden { modeBar.isHidden = true }
             if accessorySegments.selectedSegmentIndex != modeBar.mode.rawValue {
                 accessorySegments.selectedSegmentIndex = modeBar.mode.rawValue
@@ -1116,7 +1128,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// [년 | 월 | 전체] 를 누름 (순정): 화면 가운데 사진 한 장이 새 화면의 제자리로 이어지며 모양이 바뀌고,
     /// 나머지는 0.3초 동안 겹쳐 바뀜
     private func switchMode(_ mode: LibraryMode) {
-        guard mode != modeBar.mode else { return }
+        // 막대 표시는 누르는 순간 이미 바뀌어 있음 → 지금 보이는 화면으로 비교
+        let current: LibraryMode = moments?.mode ?? .all
+        guard mode != current else { return }
         // 전체 → 월은 보이던 사진들이 날 칸으로 빨려 들어가는 전용 전환
         if moments == nil && mode == .months { setLibraryMode(.months); return }
         // 지금 화면 가운데 사진
@@ -1227,6 +1241,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     private func setLibraryMode(_ mode: LibraryMode, month: Int? = nil, onShown: (() -> Void)? = nil) {
+        if mode == .all, moments != nil, usesNativeModeBar { customBarHold = true }
         modeBar.mode = mode
         if mode == .all {
             moments?.willMove(toParent: nil)
@@ -1552,6 +1567,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        if customBarHold, scrollView === collectionView {
+            customBarHold = false
+            // 넘길 때 [년 | 월 | 전체] 를 붙여 둠 (위로 스크롤하면 시스템이 줄이며 한 줄로 합침)
+            showAccessory(true)
+            updateModeBar()
+        }
         guard tabsRequested else { return }
         tabsRequested = false
         updateModeBar()
@@ -1768,18 +1789,25 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
         }
         // 처음(맨 아래)엔 펴진 탭 막대만. 위로 스크롤해 줄어들 때 붙임. 사진 보기에서 돌아오면 있던 대로
-        showAccessory(accessoryAlwaysNeeded || tabBarIsMinimized || accessoryWasShown)
+        if moments == nil && !shortContent && !customBarHold {
+            showAccessory(tabBarIsMinimized || accessoryWasShown)
+        }
         accessoryWasShown = false
     }
 
     private var accessoryWasShown = false
 
-    /// 한 화면에 다 들어와 스크롤할 수 없으면 탭 막대가 줄어들 일이 없음 → [년 | 월 | 전체] 를 늘 둠 (안 그러면 갈 길이 없음)
-    private var accessoryAlwaysNeeded: Bool {
-        guard collectionView != nil else { return false }
-        if moments != nil { return true }
+    /// 년·월에서 전체로 막 돌아옴: 순정처럼 한 줄 막대를 그대로 두다가, 손으로 스크롤하면 시스템 탭 막대에 넘김
+    private var customBarHold = false
+
+    /// 한 화면에 다 들어와 스크롤할 수 없음 (탭 막대가 줄어들 일이 없음)
+    private var shortContent: Bool {
+        guard collectionView != nil, !list.isEmpty else { return false }
         return collectionView.contentSize.height <= collectionView.bounds.height - collectionView.adjustedContentInset.bottom
     }
+
+    /// 붙여 둔 [년 | 월 | 전체] 를 펼친 탭 막대와 함께 두면 안 됨 (이제 짧은 목록·년·월은 우리 막대를 씀)
+    private var accessoryAlwaysNeeded: Bool { false }
 
     private func showAccessory(_ on: Bool) {
         guard #available(iOS 26.0, *), let tabs = tabBarController,
@@ -1792,7 +1820,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 위로(옛 사진 쪽) 스크롤하기 시작하면 붙여 둠 → 시스템이 탭 막대를 줄이며 옆에 붙임
     private func trackScrollForAccessory() {
-        guard usesNativeModeBar, nativeAccessory != nil, collectionView.isTracking || collectionView.isDecelerating else {
+        guard usesNativeModeBar, moments == nil, nativeAccessory != nil, collectionView.isTracking || collectionView.isDecelerating else {
             lastOffsetForAccessory = collectionView?.contentOffset.y ?? 0
             return
         }
