@@ -102,7 +102,11 @@ final class AssetCell: UICollectionViewCell {
             heart.frame.origin = CGPoint(x: 5, y: size.height - 5 - heart.bounds.height)
         }
         if !badge.isHidden {
-            badge.frame = CGRect(x: bounds.width - 26, y: bounds.height - 26, width: 22, height: 22)
+            // 칸이 작으면 체크도 작게 (순정: 15·31칸에서는 칸 크기에 맞춰 줄어듦)
+            let side = min(22, max(10, (bounds.width * 0.55).rounded()))
+            let margin: CGFloat = side < 22 ? 2 : 4
+            badge.frame = CGRect(x: bounds.width - margin - side, y: bounds.height - margin - side, width: side, height: side)
+            badge.layer.cornerRadius = side / 2
         }
     }
 
@@ -151,8 +155,8 @@ final class AssetCell: UICollectionViewCell {
             .applying(UIImage.SymbolConfiguration(pointSize: 19, weight: .regular))
         badge.image = UIImage(systemName: "checkmark.circle.fill", withConfiguration: config)
         badge.backgroundColor = .white
-        badge.layer.cornerRadius = 11
-        badge.contentMode = .center
+        // 칸 크기에 맞춰 줄어들게 (크기는 layoutSubviews 에서)
+        badge.contentMode = .scaleAspectFit
     }
 }
 
@@ -2170,9 +2174,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                   let cell = collectionView.cellForItem(at: path) as? AssetCell else { continue }
             let asset = assetAt(path)
             guard cell.assetID == asset.localIdentifier else { continue }
-            // 촘촘한 칸에서 빼 둔 하트·길이를 다시
-            cell.setDuration(asset.mediaType == .video ? asset.duration : nil)
-            cell.setFavorite(asset.isFavorite)
+            // 촘촘한 칸에서 빼 둔 하트·길이를 다시 (아직 촘촘한 칸(15칸)이면 그대로 뺀 채)
+            let compact = isDense
+            cell.setDuration(!compact && asset.mediaType == .video ? asset.duration : nil)
+            cell.setFavorite(!compact && asset.isFavorite)
             loadThumbnail(into: cell, asset: asset)
         }
     }
