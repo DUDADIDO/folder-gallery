@@ -1125,6 +1125,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             updateModeBar()
             return
         }
+        // 전체에서 월로 (순정): 격자에 보이던 사진이 그날 카드로 빨려 들어감. 지금 보이는 칸을 적어 둠
+        let fromGrid = (moments == nil && mode == .months && month == nil) ? visibleGridTiles() : nil
         let child: MomentsViewController
         if let existing = moments {
             child = existing
@@ -1144,8 +1146,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         navigationItem.rightBarButtonItems?.forEach { $0.isHidden = true }
         updateModeBar()
         let version = list.version
+        if let fromGrid { child.view.alpha = 0 }
         if let data = momentsData, momentsVersion == version {
             child.show(data, mode: mode, scrollToMonth: month)
+            if let fromGrid { suckIntoMonths(child, fromGrid) }
             return
         }
         let current = list
@@ -1155,7 +1159,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 guard let self else { return }
                 self.momentsData = data
                 self.momentsVersion = version
-                if self.moments === child { child.show(data, mode: child === self.moments ? self.modeBar.mode : mode, scrollToMonth: month) }
+                if self.moments === child {
+                    child.show(data, mode: child === self.moments ? self.modeBar.mode : mode, scrollToMonth: month)
+                    if let fromGrid { self.suckIntoMonths(child, fromGrid) }
+                }
             }
         }
     }
@@ -1189,6 +1196,65 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     /// 월 보기에서 날짜를 누름 → 전체 보기(3칸)에서 그날로
+    private struct GridTile { let id: String; let frame: CGRect; let image: UIImage?; let day: [Int] }
+
+    /// 지금 화면에 보이는 격자 칸들 (사진 id, 화면 자리, 그림). 가운데 칸이 맨 앞
+    private func visibleGridTiles() -> [GridTile] {
+        guard collectionView != nil else { return [] }
+        let mid = CGPoint(x: collectionView.bounds.midX, y: collectionView.bounds.midY)
+        return collectionView.indexPathsForVisibleItems.compactMap { path -> (GridTile, CGFloat)? in
+            guard let cell = collectionView.cellForItem(at: path) as? AssetCell, let id = cell.assetID else { return nil }
+            let frame = cell.convert(cell.bounds, to: view)
+            guard frame.intersects(view.bounds) else { return nil }
+            let c = cell.convert(CGPoint(x: cell.bounds.midX, y: cell.bounds.midY), to: collectionView)
+            let date = list[flatIndex(path)].creationDate ?? Date()
+            let d = Calendar.current.dateComponents([.year, .month, .day], from: date)
+            return (GridTile(id: id, frame: frame, image: cell.imageView.image, day: [d.year ?? 0, d.month ?? 0, d.day ?? 0]),
+                    hypot(c.x - mid.x, c.y - mid.y))
+        }.sorted { $0.1 < $1.1 }.map(\.0)
+    }
+
+    /// 전체 → 월 (순정): 보던 사진이 있는 달을 가운데에 놓고, 격자에 보이던 사진은 그날 카드로 커지며 날아감.
+    /// 나머지는 0.3초 동안 겹쳐 바뀜
+    private func suckIntoMonths(_ child: MomentsViewController, _ tiles: [GridTile]) {
+        // 보던 사진(화면 가운데)이 있는 날 칸을 가운데로
+        if let center = tiles.first {
+            child.centerDay(year: center.day[0], month: center.day[1], day: center.day[2])
+        }
+        // 날 칸마다: 그 대표 사진이 격자에 보였으면 그 칸에서, 아니면 같은 날 사진 중 가운데에 가까운 칸에서 날아감
+        let byID = Dictionary(tiles.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var byDay: [[Int]: GridTile] = [:]
+        for tile in tiles where byDay[tile.day] == nil { byDay[tile.day] = tile }
+        var flights: [(UIImageView, CGRect, MomentCell)] = []
+        for cover in child.visibleCovers() {
+            guard let tile = byID[cover.id] ?? byDay[cover.day], let image = tile.image ?? cover.cell.image else { continue }
+            let flyer = UIImageView(image: image)
+            flyer.contentMode = .scaleAspectFill
+            flyer.clipsToBounds = true
+            flyer.layer.cornerCurve = .continuous
+            flyer.frame = tile.frame
+            view.insertSubview(flyer, belowSubview: modeBar)
+            cover.cell.prefill(image)
+            cover.cell.contentView.alpha = 0
+            flights.append((flyer, cover.frame, cover.cell))
+        }
+        UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut]) { child.view.alpha = 1 }
+        let anim = UIViewPropertyAnimator(duration: 0.36, dampingRatio: 0.9) {
+            for (flyer, target, cell) in flights {
+                flyer.frame = target
+                flyer.layer.cornerRadius = cell.contentView.layer.cornerRadius
+            }
+        }
+        anim.addCompletion { _ in
+            // 날아간 사진이 대표 사진과 다를 수 있어 살짝 겹쳐 바꿈
+            for (_, _, cell) in flights { cell.contentView.alpha = 1 }
+            UIView.animate(withDuration: 0.15, animations: {
+                for (flyer, _, _) in flights { flyer.alpha = 0 }
+            }, completion: { _ in for (flyer, _, _) in flights { flyer.removeFromSuperview() } })
+        }
+        anim.startAnimation()
+    }
+
     /// 월 보기에서 날 칸을 누름 (순정): 그 사진이 줄어들며 3칸 격자의 제자리로 날아가고, 월 화면은 겹쳐 사라짐
     private func openDay(_ id: String, from frame: CGRect = .zero, image: UIImage? = nil, radius: CGFloat = 0) {
         let monthsSnapshot = moments?.view.snapshotView(afterScreenUpdates: false)

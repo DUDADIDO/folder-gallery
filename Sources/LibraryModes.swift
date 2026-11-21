@@ -258,6 +258,49 @@ final class MomentsViewController: UIViewController, UICollectionViewDataSource,
     /// 날짜 칸을 누름 → 그날 첫 사진으로 전체 보기. 누른 칸 자리(이 화면 좌표)·그림·모서리도 같이 (날아가는 애니메이션)
     var onPickDay: ((String, CGRect, UIImage?, CGFloat) -> Void)?
 
+    /// 지금 보이는 날 칸들 (사진 id, 이 화면 좌표 자리, 칸, 모서리)
+    func visibleCovers() -> [(id: String, day: [Int], frame: CGRect, cell: MomentCell)] {
+        guard isViewLoaded, mode == .months else { return [] }
+        collectionView.layoutIfNeeded()
+        return collectionView.indexPathsForVisibleItems.compactMap { path in
+            guard let cell = collectionView.cellForItem(at: path) as? MomentCell, let id = cell.assetID,
+                  data.months.indices.contains(path.section), data.months[path.section].days.indices.contains(path.item) else { return nil }
+            let month = data.months[path.section]
+            return (id, [month.year, month.month, month.days[path.item].day], cell.convert(cell.bounds, to: view), cell)
+        }
+    }
+
+    /// 그날 칸이 화면 가운데쯤 오게 (없으면 그 달)
+    func centerDay(year: Int, month: Int, day: Int) {
+        guard mode == .months, let section = monthIndex(year: year, month: month) else { return }
+        let item = data.months[section].days.firstIndex { $0.day == day } ?? 0
+        collectionView.layoutIfNeeded()
+        guard let attributes = collectionView.layoutAttributesForItem(at: IndexPath(item: item, section: section)) else { return }
+        let inset = collectionView.adjustedContentInset
+        let maxY = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
+        let y = min(maxY, max(-inset.top, attributes.frame.midY - collectionView.bounds.height / 2))
+        collectionView.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+        collectionView.layoutIfNeeded()
+    }
+
+    /// 월 보기에서 그 달이 화면 가운데쯤 오게
+    func centerMonth(_ month: Int) {
+        guard mode == .months, data.months.indices.contains(month) else { return }
+        collectionView.layoutIfNeeded()
+        let path = IndexPath(item: 0, section: month)
+        guard let attributes = collectionView.layoutAttributesForItem(at: path) else { return }
+        let inset = collectionView.adjustedContentInset
+        let maxY = max(-inset.top, collectionView.contentSize.height + inset.bottom - collectionView.bounds.height)
+        let y = min(maxY, max(-inset.top, attributes.frame.midY - collectionView.bounds.height / 2))
+        collectionView.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+        collectionView.layoutIfNeeded()
+    }
+
+    /// 그 해·달의 위치
+    func monthIndex(year: Int, month: Int) -> Int? {
+        data.months.firstIndex { $0.year == year && $0.month == month }
+    }
+
     /// 연도 카드를 눌러 월로 넘어갈 때: 그 사진이 같은 자리에 머물고 나머지만 겹쳐 바뀜 (순정)
     private struct Anchor { let assetID: String; let y: CGFloat; let image: UIImage?; let snapshot: UIView? }
     private var anchor: Anchor?
@@ -469,7 +512,7 @@ final class MomentCell: UICollectionViewCell {
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
     private var requestID: PHImageRequestID = PHInvalidImageRequestID
-    private var assetID: String?
+    private(set) var assetID: String?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
