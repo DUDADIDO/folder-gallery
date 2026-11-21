@@ -1200,7 +1200,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
             anim.startAnimation()
         }
-        let flyer = UIImageView(image: image)
+        let full = uncroppedImage(anchor.id, longSide: max(target.width, target.height, anchor.frame.width, anchor.frame.height), fallback: image)
+        let flyer = UIImageView(image: full)
         flyer.contentMode = .scaleAspectFill
         flyer.clipsToBounds = true
         flyer.layer.cornerCurve = .continuous
@@ -1316,6 +1317,27 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     /// 월 보기에서 날짜를 누름 → 전체 보기(3칸)에서 그날로
+    /// 날아가는 사진용 그림: 잘리지 않은 원본 비율 (격자 썸네일은 정사각형으로 잘려 있어 큰 카드로 커지면 양옆이 잘려 보임).
+    /// 사진 앱 캐시에서 바로 받음. 못 받으면 fallback
+    private func uncroppedImage(_ id: String, longSide: CGFloat, fallback: UIImage?) -> UIImage? {
+        guard let at = list.index(ofID: id) else { return fallback }
+        let asset = list[at]
+        let options = PHImageRequestOptions()
+        options.isSynchronous = true
+        options.deliveryMode = .opportunistic
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = false
+        let scale = traitCollection.displayScale
+        let w = CGFloat(max(1, asset.pixelWidth)), h = CGFloat(max(1, asset.pixelHeight))
+        let k = longSide * scale / max(w, h)
+        var result: UIImage?
+        PHImageManager.default().requestImage(for: asset, targetSize: CGSize(width: w * k, height: h * k),
+                                              contentMode: .aspectFit, options: options) { image, _ in
+            if let image { result = image }
+        }
+        return result ?? fallback
+    }
+
     private struct GridTile { let id: String; let frame: CGRect; let image: UIImage?; let day: [Int] }
 
     /// 지금 화면에 보이는 격자 칸들 (사진 id, 화면 자리, 그림). 가운데 칸이 맨 앞
@@ -1347,7 +1369,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         for tile in tiles where byDay[tile.day] == nil { byDay[tile.day] = tile }
         var flights: [(UIImageView, CGRect, MomentCell)] = []
         for cover in child.visibleCovers() {
-            guard let tile = byID[cover.id] ?? byDay[cover.day], let image = tile.image ?? cover.cell.image else { continue }
+            guard let tile = byID[cover.id] ?? byDay[cover.day],
+                  let image = uncroppedImage(tile.id, longSide: max(cover.frame.width, cover.frame.height), fallback: tile.image ?? cover.cell.image)
+            else { continue }
             let flyer = UIImageView(image: image)
             flyer.contentMode = .scaleAspectFill
             flyer.clipsToBounds = true
