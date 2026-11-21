@@ -1148,8 +1148,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         _ = anchorContent
         // 사진 칸들만 찍음 (화면 전체를 찍으면 아래 막대·큰 제목까지 같이 커져 두 겹으로 보였음)
         let beforeSource: UIView = moments?.view ?? collectionView
-        let before = beforeSource.snapshotView(afterScreenUpdates: false)
-        before?.frame = beforeSource.frame
+        let before = frozenImage(of: beforeSource)
         setLibraryMode(mode) { [weak self] in
             guard let self else { return }
             self.morphAnchor(anchor, before: before, to: mode)
@@ -1159,15 +1158,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func morphAnchor(_ anchor: (id: String, frame: CGRect, image: UIImage?, radius: CGFloat)?, before: UIView?, to mode: LibraryMode) {
         func fadeBefore(to transform: CGAffineTransform) {
             guard let before else { return }
-            // 제목·막대보다 아래, 새 화면보다 위
-            view.insertSubview(before, aboveSubview: moments?.view ?? collectionView)
-            let anim = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
-                before.transform = transform
-            }
-            // 앞 화면은 커지며 앞쪽에서 빨리 사라짐
-            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut]) { before.alpha = 0 }
-            anim.addCompletion { _ in before.removeFromSuperview() }
-            anim.startAnimation()
+            _ = transform
+            // 순정(녹화 비교): 앞 화면이 제자리에서 0.2초 동안 사라짐. 다 사라진 뒤에 치움
+            view.insertSubview(before, belowSubview: modeBar)
+            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseInOut],
+                           animations: { before.alpha = 0 }, completion: { _ in before.removeFromSuperview() })
         }
         guard let anchor, let at = list.index(ofID: anchor.id), let date = list[at].creationDate else {
             fadeBefore(to: .identity)
@@ -1207,21 +1202,23 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             let tx = (b.midX - c.x - s * (a.midX - c.x)) * 0.35, ty = (b.midY - c.y - s * (a.midY - c.y)) * 0.35
             return CGAffineTransform(translationX: tx, y: ty).scaledBy(x: s, y: s)
         }
-        fadeBefore(to: mapping(from: anchor.frame, to: target))
+        // 순정(녹화 비교): 화면은 움직이지 않고 제자리에서 0.2초 겹쳐 바뀜. 날아가는 사진 없음
+        _ = mapping
+        fadeBefore(to: .identity)
+        targetView.alpha = 1
+        if mode == .all {
+            titleOverlay.alpha = 0
+            UIView.animate(withDuration: 0.2) { self.titleOverlay.alpha = 1 }
+        }
+        _ = (image, targetRadius)
+        if true { return }
         // 전체로 돌아오면 큰 제목도 서서히 (순정)
         if mode == .all {
             titleOverlay.alpha = 0
             UIView.animate(withDuration: 0.3, delay: 0.05, options: [.curveEaseOut]) { self.titleOverlay.alpha = 1 }
         }
         let content: UIView? = mode == .all ? collectionView : moments?.view
-        if let content {
-            // 새 화면은 처음부터 선명하게 (반투명 두 장이 겹치면 흰 바탕이 비쳐 칸이 다 깜빡였음). 위의 앞 화면만 사라짐
-            content.transform = mapping(from: target, to: anchor.frame)
-            let anim = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
-                content.transform = .identity
-            }
-            anim.startAnimation()
-        }
+        _ = content
         let full = uncroppedImage(anchor.id, longSide: max(target.width, target.height, anchor.frame.width, anchor.frame.height), fallback: image)
         let flyer = UIImageView(image: full)
         flyer.contentMode = .scaleAspectFill
@@ -1367,6 +1364,19 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         return result ?? fallback
     }
 
+    /// 화면 한 장을 그림으로 굳혀 둠 (snapshotView 는 원본을 실시간으로 비춰서, 원본을 치우면 같이 비어 겹쳐 바뀌지 않았음)
+    private func frozenImage(of source: UIView) -> UIView? {
+        guard source.bounds.width > 0, source.bounds.height > 0 else { return nil }
+        let format = UIGraphicsImageRendererFormat.preferred()
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(bounds: source.bounds, format: format).image { _ in
+            source.drawHierarchy(in: source.bounds, afterScreenUpdates: false)
+        }
+        let v = UIImageView(image: image)
+        v.frame = source.convert(source.bounds, to: view)
+        return v
+    }
+
     private struct GridTile { let id: String; let frame: CGRect; let image: UIImage?; let day: [Int] }
 
     /// 지금 화면에 보이는 격자 칸들 (사진 id, 화면 자리, 그림). 가운데 칸이 맨 앞
@@ -1389,9 +1399,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 나머지는 0.3초 동안 겹쳐 바뀜
     private func suckIntoMonths(_ child: MomentsViewController, _ tiles: [GridTile]) {
         // 지금 보이는 격자를 사진으로 찍어 새 화면 위에 얹음
-        let gridShot = collectionView.snapshotView(afterScreenUpdates: false)
+        let gridShot = frozenImage(of: collectionView)
         if let gridShot {
-            gridShot.frame = collectionView.frame
             view.insertSubview(gridShot, aboveSubview: child.view)
         }
         // 막대가 바뀌며 생긴 여백 변화까지 먼저 다 반영 (안 그러면 날아갈 자리를 잰 뒤 월 화면이 몇 pt 움직여 착지가 어긋남)
@@ -1406,8 +1415,11 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         var byDay: [[Int]: GridTile] = [:]
         for tile in tiles where byDay[tile.day] == nil { byDay[tile.day] = tile }
         var flights: [(UIImageView, CGRect, MomentCell)] = []
+        // 순정(녹화 비교): 카드의 대표 사진이 격자에 보이고 있을 때만 그 칸에서 카드로 커지며 들어감.
+        // 격자에 없던 카드는 제자리에서 나타나기만 함
+        _ = byDay
         for cover in child.visibleCovers() {
-            guard let tile = byID[cover.id] ?? byDay[cover.day],
+            guard let tile = byID[cover.id],
                   let image = uncroppedImage(tile.id, longSide: max(cover.frame.width, cover.frame.height), fallback: tile.image ?? cover.cell.image)
             else { continue }
             let flyer = UIImageView(image: image)
@@ -1420,31 +1432,14 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             cover.cell.contentView.alpha = 0
             flights.append((flyer, cover.frame, cover.cell))
         }
-        // 화면 전체도 가운데 사진을 따라 커짐 (다른 전환과 같게): 격자는 그 사진이 날 칸 자리로 가도록 커지며 사라지고,
-        // 월 화면은 반대로 작은 데서 제자리로
-        if let center = tiles.first, let landing = flights.first(where: { $0.0.frame == center.frame }) ?? flights.first {
-            let c = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
-            func mapping(from a: CGRect, to b: CGRect) -> CGAffineTransform {
-                let s = min(1.25, max(0.8, b.width / max(1, a.width)))
-                return CGAffineTransform(translationX: (b.midX - c.x - s * (a.midX - c.x)) * 0.35,
-                                         y: (b.midY - c.y - s * (a.midY - c.y)) * 0.35).scaledBy(x: s, y: s)
-            }
-            let from = landing.0.frame, to = landing.1
-            child.view.transform = mapping(from: to, to: from)
-            let zoom = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
-                gridShot?.transform = mapping(from: from, to: to)
-                child.view.transform = .identity
-            }
-            zoom.startAnimation()
-        }
         // 새 화면은 처음부터 선명하게, 위에 얹은 격자 사진만 커지며 빨리 사라짐
         // (둘 다 반투명이면 흰 바탕이 비쳐 칸이 모두 깜빡였음)
         child.view.alpha = 1
         if let gridShot {
-            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut], animations: { gridShot.alpha = 0 },
+            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseInOut], animations: { gridShot.alpha = 0 },
                            completion: { _ in gridShot.removeFromSuperview() })
         }
-        let anim = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
+        let anim = UIViewPropertyAnimator(duration: 0.22, dampingRatio: 1) {
             for (flyer, target, cell) in flights {
                 flyer.frame = target
                 flyer.layer.cornerRadius = cell.contentView.layer.cornerRadius
