@@ -752,14 +752,14 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         self.folder = folder
         self.isRoot = isRoot
         // 보관함은 순정처럼 끝까지 오므리면 아주 촘촘한 칸(그때 아래에 [년 | 월 | 전체])
-        levels = folder.id == "all" ? [1, 3, 5, PhotoGridLayout.compactColumns, PhotoGridLayout.denseColumns]
-            : (isRoot ? [1, 3, 5, 7] : [1, 3, 5])
+        // 보관함·미분류(탭 첫 화면)는 순정 보관함과 같은 칸 수
+        levels = isRoot ? [1, 3, 5, PhotoGridLayout.compactColumns, PhotoGridLayout.denseColumns] : [1, 3, 5]
         super.init(nibName: nil, bundle: nil)
         // 앨범 안에서도 순정처럼 아래 탭 막대를 그대로 둠 (닫히는 확대 전환 끝에서 화면이 덜컥이지 않게)
         var saved = isRoot ? Prefs.gridColumns : Prefs.albumGridColumns
         if saved == 4 { saved = 3 }   // 예전의 4칸은 3칸으로
-        if folder.id == "all" && saved == 7 { saved = 5 }   // 예전 보관함의 7칸·25칸은 순정 칸 수로
-        if folder.id == "all" && saved == 25 { saved = PhotoGridLayout.denseColumns }
+        if isRoot && saved == 7 { saved = 5 }   // 예전의 7칸·25칸은 순정 칸 수로
+        if isRoot && saved == 25 { saved = PhotoGridLayout.denseColumns }
         // 순정 iOS 27 은 보관함·앨범 모두 3칸이 기본
         columns = levels.contains(saved) ? saved : 3
     }
@@ -2255,7 +2255,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 오므리는 순간 1000장 넘게 한꺼번에 요청하느라 칸이 늦게 차던 것을 줄임 (순정은 0.9초 안에 다 참)
     private var warmedAround: Int?
     private func warmDenseCache() {
-        guard folder.id == "all", collectionView != nil, !list.isEmpty, let index = levels.firstIndex(of: columns) else { return }
+        guard isRoot, collectionView != nil, !list.isEmpty, let index = levels.firstIndex(of: columns) else { return }
         // 오므리거나 펼쳤을 때 갈 촘촘한 칸 수 (5칸 → 15칸, 15칸 ↔ 31칸)
         let targets = [index + 1, index - 1].filter { levels.indices.contains($0) }.map { levels[$0] }
             .filter { PhotoGridLayout.isCompact($0) }
@@ -2622,22 +2622,25 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             // 앨범 안에서는 이름이 큰 대표 사진 위에, 보관함·미분류는 사진 위 제목에 있어서 위 막대 제목은 비움
             navigationItem.title = nil
             navigationItem.hidesBackButton = false
-            if folder.id == "unsorted" {
-                let sort = UIBarButtonItem(title: "정리하기", style: .plain, target: self, action: #selector(startSorter))
-                sort.isEnabled = !list.isEmpty
-                navigationItem.leftBarButtonItem = sort
-            } else {
-                navigationItem.leftBarButtonItem = nil
-            }
+            // 왼쪽은 비움 (사진 위 큰 제목 자리). 미분류의 '정리하기'는 오른쪽 단추들 앞에
+            navigationItem.leftBarButtonItem = nil
             let select = UIBarButtonItem(title: "선택", style: .plain, target: self, action: #selector(startSelecting))
             select.isEnabled = !list.isEmpty
             if isRoot {
                 // 순정 iOS 27 보관함처럼: [정렬·필터] [선택]
-                navigationItem.rightBarButtonItems = [
+                var items: [UIBarButtonItem] = [
                     select, UIBarButtonItem.fixedSpace(8),
                     UIBarButtonItem(image: UIImage(systemName: libraryFilter == .all ? "line.3.horizontal.decrease"
                                                     : "line.3.horizontal.decrease.circle.fill"), menu: makeLibraryMenu()),
                 ]
+                if folder.id == "unsorted" {
+                    let sort = UIBarButtonItem(image: UIImage(systemName: "tray.and.arrow.down"), style: .plain,
+                                               target: self, action: #selector(startSorter))
+                    sort.accessibilityLabel = "정리하기"
+                    sort.isEnabled = !list.isEmpty
+                    items += [UIBarButtonItem.fixedSpace(8), sort]
+                }
+                navigationItem.rightBarButtonItems = items
             } else {
                 // 순정 앨범 화면처럼: [정렬 ⋯] [선택]
                 // 순정 iOS 27 앨범 화면: 왼쪽부터 [⋯] [정렬] [선택], 각각 따로 떨어진 원
