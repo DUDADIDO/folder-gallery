@@ -1209,11 +1209,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         }
         let content: UIView? = mode == .all ? collectionView : moments?.view
         if let content {
+            // 새 화면은 처음부터 선명하게 (반투명 두 장이 겹치면 흰 바탕이 비쳐 칸이 다 깜빡였음). 위의 앞 화면만 사라짐
             content.transform = mapping(from: target, to: anchor.frame)
-            content.alpha = 0
             let anim = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
                 content.transform = .identity
-                content.alpha = 1
             }
             anim.startAnimation()
         }
@@ -1378,6 +1377,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 전체 → 월 (순정): 보던 사진이 있는 달을 가운데에 놓고, 격자에 보이던 사진은 그날 카드로 커지며 날아감.
     /// 나머지는 0.3초 동안 겹쳐 바뀜
     private func suckIntoMonths(_ child: MomentsViewController, _ tiles: [GridTile]) {
+        // 지금 보이는 격자를 사진으로 찍어 새 화면 위에 얹음
+        let gridShot = view.snapshotView(afterScreenUpdates: false)
+        if let gridShot {
+            gridShot.frame = view.bounds
+            view.insertSubview(gridShot, aboveSubview: child.view)
+        }
         // 막대가 바뀌며 생긴 여백 변화까지 먼저 다 반영 (안 그러면 날아갈 자리를 잰 뒤 월 화면이 몇 pt 움직여 착지가 어긋남)
         view.layoutIfNeeded()
         child.view.layoutIfNeeded()
@@ -1414,20 +1419,19 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             }
             let from = landing.0.frame, to = landing.1
             child.view.transform = mapping(from: to, to: from)
-            let grid = collectionView!
             let zoom = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
-                grid.transform = mapping(from: from, to: to)
+                gridShot?.transform = mapping(from: from, to: to)
                 child.view.transform = .identity
-            }
-            // 커지는 격자는 앞쪽에서 빨리 사라짐 (사진 주변에 확대된 칸이 남아 보이지 않게)
-            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut]) { grid.alpha = 0 }
-            zoom.addCompletion { _ in
-                grid.transform = .identity
-                grid.alpha = 1
             }
             zoom.startAnimation()
         }
-        UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseInOut]) { child.view.alpha = 1 }
+        // 새 화면은 처음부터 선명하게, 위에 얹은 격자 사진만 커지며 빨리 사라짐
+        // (둘 다 반투명이면 흰 바탕이 비쳐 칸이 모두 깜빡였음)
+        child.view.alpha = 1
+        if let gridShot {
+            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut], animations: { gridShot.alpha = 0 },
+                           completion: { _ in gridShot.removeFromSuperview() })
+        }
         let anim = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
             for (flyer, target, cell) in flights {
                 flyer.frame = target
