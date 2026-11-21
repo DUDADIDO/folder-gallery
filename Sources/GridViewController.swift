@@ -9,12 +9,65 @@ final class AssetCell: UICollectionViewCell {
     let imageView = UIImageView()
     /// 확대 전환이 쓰는 그림 판 (사진 + 길이 글자). 셀 자체는 격자가 자리·변형을 다시 덮어쓰므로 셀 대신 이걸 넘김
     private let thumbView = UIView()
-    private let dim = UIView()
-    private let badge = UIImageView()
-    private let durationLabel = UILabel()
+    // 아래 넷은 처음 쓸 때 만듦. 끝까지 오므린 칸(31칸)은 화면에 셀이 2천 개쯤이라
+    // 셀마다 레이어가 적을수록 스크롤이 부드러움 (거기선 하트·길이·체크를 안 그려서 아예 안 생김)
+    private var dimView: UIView?
+    private var badgeView: UIImageView?
+    private var durationView: UILabel?
     /// 즐겨찾기 표시 (순정처럼 왼쪽 아래 작은 흰 하트)
-    private let heart = UIImageView(image: UIImage(systemName: "heart.fill",
-                                                   withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)))
+    private var heartView: UIImageView?
+
+    private var dim: UIView {
+        if let dimView { return dimView }
+        let v = UIView()
+        // 순정 iOS 27: 고른 칸은 살짝 밝아짐 (어두워지지 않음)
+        v.backgroundColor = UIColor.white.withAlphaComponent(0.3)
+        v.frame = contentView.bounds
+        v.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        v.isHidden = true
+        contentView.insertSubview(v, aboveSubview: thumbView)
+        dimView = v
+        return v
+    }
+
+    private var badge: UIImageView {
+        if let badgeView { return badgeView }
+        let v = UIImageView()
+        v.isHidden = true
+        contentView.addSubview(v)
+        badgeView = v
+        return v
+    }
+
+    private var durationLabel: UILabel {
+        if let durationView { return durationView }
+        let v = UILabel()
+        v.font = .systemFont(ofSize: 12, weight: .semibold)
+        v.textColor = .white
+        v.layer.shadowColor = UIColor.black.cgColor
+        v.layer.shadowOpacity = 0.8
+        v.layer.shadowRadius = 2
+        v.layer.shadowOffset = .zero
+        thumbView.addSubview(v)
+        durationView = v
+        return v
+    }
+
+    private var heart: UIImageView {
+        if let heartView { return heartView }
+        let v = UIImageView(image: UIImage(systemName: "heart.fill",
+                                           withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)))
+        v.tintColor = .white
+        v.layer.shadowColor = UIColor.black.cgColor
+        v.layer.shadowOpacity = 0.6
+        v.layer.shadowRadius = 2
+        v.layer.shadowOffset = .zero
+        v.isHidden = true
+        v.sizeToFit()
+        thumbView.addSubview(v)
+        heartView = v
+        return v
+    }
 
     var assetID: String?
     var requestID: PHImageRequestID = PHInvalidImageRequestID
@@ -49,36 +102,9 @@ final class AssetCell: UICollectionViewCell {
         imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         thumbView.addSubview(imageView)
 
-        // 순정 iOS 27: 고른 칸은 살짝 밝아짐 (어두워지지 않음)
-        dim.backgroundColor = UIColor.white.withAlphaComponent(0.3)
-        dim.frame = contentView.bounds
-        dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        dim.isHidden = true
-        contentView.addSubview(dim)
-
-        durationLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-        durationLabel.textColor = .white
-        durationLabel.layer.shadowColor = UIColor.black.cgColor
-        durationLabel.layer.shadowOpacity = 0.8
-        durationLabel.layer.shadowRadius = 2
-        durationLabel.layer.shadowOffset = .zero
-        thumbView.addSubview(durationLabel)
-
-        heart.tintColor = .white
-        heart.layer.shadowColor = UIColor.black.cgColor
-        heart.layer.shadowOpacity = 0.6
-        heart.layer.shadowRadius = 2
-        heart.layer.shadowOffset = .zero
-        heart.isHidden = true
-        thumbView.addSubview(heart)
-
-        badge.isHidden = true
-        contentView.addSubview(badge)
-
         // 오토레이아웃 없이 layoutSubviews 에서 직접 놓음 (칸이 수천 개라 제약 계산이 스크롤을 느리게 했음)
         insetsLayoutMarginsFromSafeArea = false
         contentView.insetsLayoutMarginsFromSafeArea = false
-        heart.sizeToFit()
     }
 
     required init?(coder: NSCoder) {
@@ -94,14 +120,14 @@ final class AssetCell: UICollectionViewCell {
         if thumbView.bounds != size { thumbView.bounds = size }
         if thumbView.center != center { thumbView.center = center }
         // 길이(오른쪽 아래)·하트(왼쪽 아래)·체크(오른쪽 아래, 순정)
-        if durationLabel.text != nil {
+        if let durationLabel = durationView, durationLabel.text != nil {
             let fit = durationLabel.sizeThatFits(CGSize(width: 200, height: 40))
             durationLabel.frame = CGRect(x: size.width - 5 - fit.width, y: size.height - 4 - fit.height, width: fit.width, height: fit.height)
         }
-        if !heart.isHidden {
+        if let heart = heartView, !heart.isHidden {
             heart.frame.origin = CGPoint(x: 5, y: size.height - 5 - heart.bounds.height)
         }
-        if !badge.isHidden {
+        if let badge = badgeView, !badge.isHidden {
             // 칸이 작으면 체크도 작게 (순정: 15·31칸에서는 칸 크기에 맞춰 줄어듦)
             let side = min(22, max(10, (bounds.width * 0.55).rounded()))
             let margin: CGFloat = side < 22 ? 2 : 4
@@ -121,19 +147,21 @@ final class AssetCell: UICollectionViewCell {
     /// 종횡비 격자: 사진 전체가 칸 안에 (잘리지 않게)
     var aspectFit = false {
         didSet {
+            guard aspectFit != oldValue else { return }
             imageView.contentMode = aspectFit ? .scaleAspectFit : .scaleAspectFill
             imageView.backgroundColor = aspectFit ? .clear : .secondarySystemBackground
         }
     }
 
     func setFavorite(_ on: Bool) {
+        if !on && heartView == nil { return }
         if heart.isHidden == on { setNeedsLayout() }
         heart.isHidden = !on
     }
 
     func setDuration(_ seconds: TimeInterval?) {
         guard let seconds else {
-            durationLabel.text = nil
+            durationView?.text = nil
             return
         }
         setNeedsLayout()
@@ -145,11 +173,13 @@ final class AssetCell: UICollectionViewCell {
     /// 순정 iOS 27: 고르지 않은 칸에는 아무 표시 없음. 고른 칸만 밝게 + 흰 테두리 파란 체크
     private func updateBadge() {
         let on = selecting && isSelected
+        // 안 고른 칸은 표시가 처음부터 없으면 만들지 않음
+        guard on || dimView != nil else { return }
         dim.isHidden = !on
         badge.isHidden = !on
         if on { setNeedsLayout() }
         // 순정: 고른 비디오는 길이 대신 체크만
-        durationLabel.alpha = on ? 0 : 1
+        durationView?.alpha = on ? 0 : 1
         guard on else { return }
         let config = UIImage.SymbolConfiguration(paletteColors: [.white, .systemBlue])
             .applying(UIImage.SymbolConfiguration(pointSize: 19, weight: .regular))
@@ -1016,10 +1046,12 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let text = "\(Calendar.current.component(.year, from: date))년"
         if yearChip.text != text { yearChip.text = text }
         yearChip.sizeToFit()
-        yearChip.frame = CGRect(x: view.safeAreaInsets.left + 12, y: titleOverlay.frame.maxY + 4,
-                                width: yearChip.bounds.width, height: 22)
+        let chipFrame = CGRect(x: view.safeAreaInsets.left + 12, y: titleOverlay.frame.maxY + 4,
+                               width: yearChip.bounds.width, height: 22)
+        if yearChip.frame != chipFrame { yearChip.frame = chipFrame }
         if yearChip.superview == nil { view.addSubview(yearChip) }
-        view.bringSubviewToFront(yearChip)
+        // 같은 일은 다시 안 함 (스크롤 중 프레임마다 화면 전체를 다시 배치하게 만들지 않게)
+        if view.subviews.last !== yearChip { view.bringSubviewToFront(yearChip) }
     }
 
     private func updateModeBar() {
@@ -1138,12 +1170,14 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     }
 
     /// 아래 막대의 보관함 아이콘 → 보통 칸으로 돌아가고 탭 막대가 다시 보임
+    /// [년 | 월 | 전체] 옆 사진 아이콘 (순정): 모든 사진·보통 칸으로 돌아가 최신(맨 아래)으로 가고, 탭 막대가 다시 나옴
     private func leaveDense() {
-        let anchor = collectionView.indexPathsForVisibleItems.sorted().dropFirst(collectionView.indexPathsForVisibleItems.count / 2).first
-            .map { list[flatIndex($0)].localIdentifier }
         setLibraryMode(.all)
-        setColumnsDirectly(5)
-        if let anchor { reveal(assetID: anchor) }
+        if PhotoGridLayout.isCompact(columns) {
+            setColumnsDirectly(5)   // 최신 끝으로 감
+        } else {
+            scrollToLatest(animated: true)
+        }
         updateModeBar()
     }
 
@@ -1164,9 +1198,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 사진이 한 화면보다 적으면 순정처럼 최신이 있는 아래쪽에 붙임 (제목 밑에 가리지 않게)
     private func alignShortContentToBottom() {
         guard isRoot, !newestFirst, collectionView != nil else { return }
-        collectionView.layoutIfNeeded()
+        // 배치에 내용 높이만 물음 (layoutIfNeeded 로 셀 수천 개를 프레임마다 다시 놓지 않게)
         let visible = collectionView.bounds.height - collectionView.contentInset.bottom
-        let top = max(0, visible - collectionView.contentSize.height)
+        let top = max(0, visible - collectionView.collectionViewLayout.collectionViewContentSize.height)
         if abs(collectionView.contentInset.top - top) > 0.5 {
             collectionView.contentInset.top = top
             if top > 0 { collectionView.contentOffset.y = -top }
@@ -1176,7 +1210,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     private func layoutTitleOverlay() {
         let barFrame = navigationController.map { view.convert($0.navigationBar.frame, from: $0.view) }
             ?? CGRect(x: 0, y: view.safeAreaInsets.top, width: view.bounds.width, height: 54)
-        titleOverlay.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: barFrame.maxY + 46)
+        let overlayFrame = CGRect(x: 0, y: 0, width: view.bounds.width, height: barFrame.maxY + 46)
+        if titleOverlay.frame != overlayFrame { titleOverlay.frame = overlayFrame }
         titleOverlay.titleCenterY = barFrame.midY
         // 아이패드: 탭 막대가 숨고(선택 중) 사이드바도 닫히면 사이드바 버튼이 왼쪽 위에 혼자 뜸. 제목을 그 옆으로
         var buttonRoom: CGFloat = 0
@@ -2304,8 +2339,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let targets = [index + 1, index - 1].filter { levels.indices.contains($0) }.map { levels[$0] }
             .filter { PhotoGridLayout.isCompact($0) }
         guard !targets.isEmpty else { return }
-        let paths = collectionView.indexPathsForVisibleItems
-        guard let center = paths.map(flatIndex).sorted().dropFirst(paths.count / 2).first else { return }
+        // 가운데 칸 하나만 찾음 (보이는 칸 2천 개를 매번 정렬하면 스크롤 중 프레임마다 느려짐)
+        let mid = CGPoint(x: collectionView.bounds.midX, y: collectionView.bounds.midY)
+        guard let path = collectionView.indexPathForItem(at: mid) ?? collectionView.indexPathsForVisibleItems.first else { return }
+        let center = flatIndex(path)
         // 조금 움직인 정도면 다시 하지 않음
         if let last = warmedAround, abs(last - center) < 300 { return }
         warmedAround = center
@@ -3019,8 +3056,8 @@ final class LibraryTitleOverlay: UIView {
     private let gradient = CAGradientLayer()
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
-    var titleCenterY: CGFloat = 86 { didSet { setNeedsLayout() } }
-    var leading: CGFloat = 20 { didSet { setNeedsLayout() } }
+    var titleCenterY: CGFloat = 86 { didSet { if titleCenterY != oldValue { setNeedsLayout() } } }
+    var leading: CGFloat = 20 { didSet { if leading != oldValue { setNeedsLayout() } } }
 
     var title: String? {
         get { titleLabel.text }
@@ -3030,6 +3067,7 @@ final class LibraryTitleOverlay: UIView {
     var subtitle: String? {
         get { subtitleLabel.text }
         set {
+            guard newValue != subtitleLabel.text else { return }   // 스크롤 중 같은 글자면 다시 배치 안 함
             subtitleLabel.text = newValue
             subtitleLabel.isHidden = newValue == nil
             // 글자 길이가 바뀌면 너비도 다시 (안 그러면 앞 글자 길이로 잘림)
