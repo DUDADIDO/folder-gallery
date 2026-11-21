@@ -849,3 +849,99 @@ enum Thumbs {
         return options
     }()
 }
+
+/// 촘촘한 칸(15·31칸)용 작은 썸네일을 디스크에 저장해 둠. 순정 사진 앱처럼 켜자마자 바로 보이게.
+/// 앱 캐시 폴더라 기기 밖으로 나가지 않고, 공간이 모자라면 시스템이 지울 수 있음 (그러면 다시 만듦)
+final class ThumbStore {
+    static let shared = ThumbStore()
+    /// 저장하는 한 변 (화소). 15칸(약 79화소)과 31칸(약 38화소) 둘 다 이것 하나로
+    static let pixel: CGFloat = 80
+
+    private let folder: URL
+    private let io = DispatchQueue(label: "gallery.thumbstore.io", qos: .userInitiated, attributes: .concurrent)
+    private let builder = DispatchQueue(label: "gallery.thumbstore.build", qos: .utility)
+    private let memory = NSCache<NSString, UIImage>()
+    private let lock = NSLock()
+    private var token = 0
+
+    private init() {
+        folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("thumbs", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        memory.countLimit = 8000
+        NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil,
+                                               queue: .main) { [weak self] _ in self?.memory.removeAllObjects() }
+    }
+
+    /// 사진이 바뀌면(편집) 이름이 바뀌어 새로 만들어짐
+    private func name(_ asset: PHAsset) -> String {
+        let id = asset.localIdentifier.replacingOccurrences(of: "/", with: "_")
+        let stamp = Int(asset.modificationDate?.timeIntervalSince1970 ?? 0)
+        return "\(id)_\(stamp).jpg"
+    }
+
+    /// 이미 메모리에 풀어 둔 것 (바로)
+    func cached(_ asset: PHAsset) -> UIImage? {
+        memory.object(forKey: name(asset) as NSString)
+    }
+
+    /// 디스크에서 읽음 (없으면 nil). done 은 메인 스레드에서
+    func load(_ asset: PHAsset, done: @escaping (UIImage?) -> Void) {
+        let key = name(asset)
+        if let image = memory.object(forKey: key as NSString) {
+            done(image)
+            return
+        }
+        let url = folder.appendingPathComponent(key)
+        io.async { [weak self] in
+            guard let data = try? Data(contentsOf: url), let image = UIImage(data: data)?.preparingForDisplay() else {
+                DispatchQueue.main.async { done(nil) }
+                return
+            }
+            self?.memory.setObject(image, forKey: key as NSString)
+            DispatchQueue.main.async { done(image) }
+        }
+    }
+
+    /// 없는 것만 뒤에서 조금씩 만듦 (최신 사진부터). 다 만들면 지워진 사진의 파일을 정리.
+    /// 새로 부르면 하던 것은 멈추고 새 목록으로
+    func build(_ list: AssetList) {
+        lock.lock(); token += 1; let mine = token; lock.unlock()
+        let folder = self.folder
+        builder.async { [weak self] in
+            guard let self else { return }
+            let assets = list.array()
+            let names = assets.map(self.name)
+            let existing = Set((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [])
+            let options = PHImageRequestOptions()
+            options.isSynchronous = true
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .fast
+            options.isNetworkAccessAllowed = false
+            let size = CGSize(width: ThumbStore.pixel, height: ThumbStore.pixel)
+            for index in stride(from: assets.count - 1, through: 0, by: -1) {
+                if self.cancelled(mine) { return }
+                let name = names[index]
+                if existing.contains(name) { continue }
+                autoreleasepool {
+                    var made: UIImage?
+                    PHImageManager.default().requestImage(for: assets[index], targetSize: size, contentMode: .aspectFill,
+                                                          options: options) { image, _ in made = image }
+                    if let data = made?.jpegData(compressionQuality: 0.6) {
+                        try? data.write(to: folder.appendingPathComponent(name), options: .atomic)
+                    }
+                }
+            }
+            // 보관함에서 빠진 사진(지움·편집 전 것)의 파일 정리
+            let keep = Set(names)
+            for file in existing where !keep.contains(file) {
+                try? FileManager.default.removeItem(at: folder.appendingPathComponent(file))
+            }
+        }
+    }
+
+    private func cancelled(_ mine: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return mine != token
+    }
+}

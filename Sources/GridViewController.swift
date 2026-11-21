@@ -1872,6 +1872,7 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         // 최신 쪽 끝을 보고 있었으면 새 사진이 들어와도 끝에 머묾 (순정처럼)
         let stayAtLatest = isRoot && !needsScrollToLatest && isAtLatest
         list = new
+        if folder.id == "all", isRoot { ThumbStore.shared.build(Library.shared.list(for: "all", newestFirst: false)) }
         buildSections()
         gridLayout.setSections(layoutCounts)
         collectionView.reloadData()
@@ -2125,11 +2126,26 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 Thumbs.manager.cancelImageRequest(cell.requestID)
                 cell.requestID = PHInvalidImageRequestID
             }
-            if let ready = DenseThumbs.shared.image(for: id, size: thumbSize) {
+            if let ready = DenseThumbs.shared.image(for: id, size: thumbSize) ?? ThumbStore.shared.cached(asset) {
                 cell.imageView.image = ready
                 return
             }
+            // 디스크에 만들어 둔 작은 썸네일이 있으면 그것 (사진 앱에 묻는 것보다 훨씬 빠름), 없으면 사진 앱에
+            ThumbStore.shared.load(asset) { [weak self, weak cell] image in
+                guard let cell, cell.assetID == id else { return }
+                if let image {
+                    cell.imageView.image = image
+                } else {
+                    self?.requestFromPhotos(into: cell, asset: asset)
+                }
+            }
+            return
         }
+        requestFromPhotos(into: cell, asset: asset)
+    }
+
+    private func requestFromPhotos(into cell: AssetCell, asset: PHAsset) {
+        let id = asset.localIdentifier
         if cell.requestID != PHInvalidImageRequestID {
             Thumbs.manager.cancelImageRequest(cell.requestID)
         }
@@ -3262,11 +3278,19 @@ final class DenseThumbs {
             let id = key(asset.localIdentifier, size)
             guard images[id] == nil, !pending.contains(id) else { continue }
             pending.insert(id)
-            manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: options) { [weak self] image, _ in
+            ThumbStore.shared.load(asset) { [weak self] disk in
                 guard let self else { return }
-                self.pending.remove(id)
-                guard let image else { return }
-                self.store(image, for: id)
+                if let disk {
+                    self.pending.remove(id)
+                    self.store(disk, for: id)
+                    return
+                }
+                self.manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: self.options) { [weak self] image, _ in
+                    guard let self else { return }
+                    self.pending.remove(id)
+                    guard let image else { return }
+                    self.store(image, for: id)
+                }
             }
         }
     }
