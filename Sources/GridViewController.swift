@@ -1170,6 +1170,8 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             return
         }
         // 새 화면에서 그 사진이 갈 자리
+        view.layoutIfNeeded()
+        moments?.view.layoutIfNeeded()
         var target: CGRect?
         var targetView: UIView?
         var targetRadius: CGFloat = 0
@@ -1233,9 +1235,10 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         if !sameCover {
             anim.addAnimations({ flyer.alpha = 0; targetView.alpha = 1 }, delayFactor: 0.25)
         }
-        anim.addCompletion { _ in
+        anim.addCompletion { [weak self] _ in
+            if let self, let host = targetView.superview { flyer.frame = host.convert(host.bounds, to: self.view) }
             targetView.alpha = 1
-            UIView.animate(withDuration: 0.12, animations: { flyer.alpha = 0 }, completion: { _ in flyer.removeFromSuperview() })
+            UIView.animate(withDuration: 0.08, animations: { flyer.alpha = 0 }, completion: { _ in flyer.removeFromSuperview() })
         }
         anim.startAnimation()
     }
@@ -1374,6 +1377,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
     /// 전체 → 월 (순정): 보던 사진이 있는 달을 가운데에 놓고, 격자에 보이던 사진은 그날 카드로 커지며 날아감.
     /// 나머지는 0.3초 동안 겹쳐 바뀜
     private func suckIntoMonths(_ child: MomentsViewController, _ tiles: [GridTile]) {
+        // 막대가 바뀌며 생긴 여백 변화까지 먼저 다 반영 (안 그러면 날아갈 자리를 잰 뒤 월 화면이 몇 pt 움직여 착지가 어긋남)
+        view.layoutIfNeeded()
+        child.view.layoutIfNeeded()
         // 보던 사진(화면 가운데)이 있는 날 칸을 가운데로
         if let center = tiles.first {
             child.centerDay(year: center.day[0], month: center.day[1], day: center.day[2])
@@ -1422,12 +1428,19 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
                 flyer.layer.cornerRadius = cell.contentView.layer.cornerRadius
             }
         }
+        // 날아가는 뒤쪽 절반에 카드(대표 사진·날짜 글자·그림자)가 서서히 겹쳐 드러남.
+        // 날아간 사진과 대표 사진이 다르거나 글자가 있어도 착지 순간 툭 바뀌지 않게
+        anim.addAnimations({
+            for (flyer, _, cell) in flights {
+                cell.contentView.alpha = 1
+                flyer.alpha = 0
+            }
+        }, delayFactor: 0.4)
         anim.addCompletion { _ in
-            // 날아간 사진이 대표 사진과 다를 수 있어 살짝 겹쳐 바꿈
-            for (_, _, cell) in flights { cell.contentView.alpha = 1 }
-            UIView.animate(withDuration: 0.15, animations: {
-                for (flyer, _, _) in flights { flyer.alpha = 0 }
-            }, completion: { _ in for (flyer, _, _) in flights { flyer.removeFromSuperview() } })
+            for (flyer, _, cell) in flights {
+                cell.contentView.alpha = 1
+                flyer.removeFromSuperview()
+            }
         }
         anim.startAnimation()
     }
