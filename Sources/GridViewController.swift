@@ -1143,6 +1143,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             anchor = (tile.id, tile.frame, tile.image, 0)
             if let path = indexPath(forAssetID: tile.id) { anchorContent = collectionView.cellForItem(at: path)?.contentView }
         }
+        // 순정: 년에서 월로 돌아가면 년으로 가기 전에 보던 달로 (화면 가운데 연도가 아니라)
+        if current == .months, let id = anchor?.id { lastMonthAnchorID = id }
+        if current == .years, mode == .months, let id = lastMonthAnchorID, let a = anchor { anchor = (id, a.frame, a.image, a.radius) }
         // 앞 화면을 그대로 찍음 (숨기고 찍으면 그 한 프레임이 실제 화면에 비어 보였음).
         // 찍힌 그 사진은 날아가는 사진과 같은 길로 커지며 빨리 사라져 두 장으로 보이지 않음
         _ = anchorContent
@@ -1151,22 +1154,31 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         let before = frozenImage(of: beforeSource)
         setLibraryMode(mode) { [weak self] in
             guard let self else { return }
-            self.morphAnchor(anchor, before: before, to: mode)
+            self.morphAnchor(anchor, before: before, to: mode, from: current)
         }
     }
 
-    private func morphAnchor(_ anchor: (id: String, frame: CGRect, image: UIImage?, radius: CGFloat)?, before: UIView?, to mode: LibraryMode) {
+    private func morphAnchor(_ anchor: (id: String, frame: CGRect, image: UIImage?, radius: CGFloat)?, before: UIView?,
+                             to mode: LibraryMode, from old: LibraryMode = .all) {
+        // 순정(녹화 비교):
+        //  월 ↔ 전체: 가운데 카드 사진 한 장이 격자 칸 ↔ 카드로 줄고 커지며 날아가고, 나머지는 0.2초 겹쳐 바뀜
+        //  년이 끼면: 화면 전체가 그 해 카드 쪽으로 줄어들거나(→년) 카드에서 커져 나옴(년→), 0.35초
+        let zoomScreen = mode == .years || old == .years
+        let duration: TimeInterval = 0.35
         func fadeBefore(to transform: CGAffineTransform) {
             guard let before else { return }
-            _ = transform
-            // 순정(녹화 비교): 앞 화면이 제자리에서 0.2초 동안 사라짐. 다 사라진 뒤에 치움
-            // 큰 제목 아래에 (위에 얹으면 제목이 바로 가려져 툭 사라져 보였음)
-            // 순서: 새 화면 → 앞 화면 그림 → 큰 제목 → 아래 막대 (새 화면이 위를 덮으면 겹치기 전에 툭 가려졌음)
+            // 순서: 새 화면 → 앞 화면 그림 → 큰 제목 → 아래 막대
             view.insertSubview(before, aboveSubview: moments?.view ?? collectionView)
             if titleOverlay.superview === view { view.insertSubview(titleOverlay, aboveSubview: before) }
             view.bringSubviewToFront(modeBar)
-            UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseInOut],
-                           animations: { before.alpha = 0 }, completion: { _ in before.removeFromSuperview() })
+            let move = UIViewPropertyAnimator(duration: duration, dampingRatio: 1) { before.transform = transform }
+            move.addCompletion { _ in before.removeFromSuperview() }
+            move.startAnimation()
+            UIView.animate(withDuration: zoomScreen ? 0.25 : 0.2, delay: 0, options: [.curveEaseInOut]) { before.alpha = 0 }
+        }
+        if mode == .all {
+            titleOverlay.alpha = 0
+            UIView.animate(withDuration: 0.2) { self.titleOverlay.alpha = 1 }
         }
         guard let anchor, let at = list.index(ofID: anchor.id), let date = list[at].creationDate else {
             fadeBefore(to: .identity)
@@ -1193,36 +1205,30 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
             targetRadius = cell.contentView.layer.cornerRadius
             if cell.image == nil { cell.prefill(anchor.image) }
         }
-        guard let target, let targetView, let image = anchor.image else {
+        guard let target, let targetView else {
             fadeBefore(to: .identity)
             return
         }
-        // 화면 전체가 그 사진을 따라 커지고 작아짐 (순정): 앞 화면은 사진이 새 자리로 가도록 움직이며 사라지고,
-        // 새 화면은 사진이 앞 자리에 있던 모양에서 제자리로 오며 나타남
         let c = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
-        // 화면 전체는 살짝만 (0.8~1.25배, 이동도 일부만). 끝까지 가는 건 날아가는 사진 한 장 (순정)
         func mapping(from a: CGRect, to b: CGRect) -> CGAffineTransform {
-            let s = min(1.25, max(0.8, b.width / max(1, a.width)))
-            let tx = (b.midX - c.x - s * (a.midX - c.x)) * 0.35, ty = (b.midY - c.y - s * (a.midY - c.y)) * 0.35
-            return CGAffineTransform(translationX: tx, y: ty).scaledBy(x: s, y: s)
+            let s = min(3, max(0.3, b.width / max(1, a.width)))
+            return CGAffineTransform(translationX: b.midX - c.x - s * (a.midX - c.x), y: b.midY - c.y - s * (a.midY - c.y))
+                .scaledBy(x: s, y: s)
         }
-        // 순정(녹화 비교): 화면은 움직이지 않고 제자리에서 0.2초 겹쳐 바뀜. 날아가는 사진 없음
-        _ = mapping
+        if zoomScreen {
+            // 앞 화면은 그 사진이 새 자리로 가도록 줄거나 커지며 사라지고, 새 화면은 반대 모양에서 제자리로 (선명한 채로)
+            fadeBefore(to: mapping(from: anchor.frame, to: target))
+            let content: UIView? = mode == .all ? collectionView : moments?.view
+            if let content {
+                content.transform = mapping(from: target, to: anchor.frame)
+                let anim = UIViewPropertyAnimator(duration: duration, dampingRatio: 1) { content.transform = .identity }
+                anim.startAnimation()
+            }
+            return
+        }
+        // 월 ↔ 전체: 사진 한 장만 날아감
         fadeBefore(to: .identity)
-        targetView.alpha = 1
-        if mode == .all {
-            titleOverlay.alpha = 0
-            UIView.animate(withDuration: 0.2) { self.titleOverlay.alpha = 1 }
-        }
-        _ = (image, targetRadius)
-        if true { return }
-        // 전체로 돌아오면 큰 제목도 서서히 (순정)
-        if mode == .all {
-            titleOverlay.alpha = 0
-            UIView.animate(withDuration: 0.3, delay: 0.05, options: [.curveEaseOut]) { self.titleOverlay.alpha = 1 }
-        }
-        let content: UIView? = mode == .all ? collectionView : moments?.view
-        _ = content
+        guard let image = anchor.image else { return }
         let full = uncroppedImage(anchor.id, longSide: max(target.width, target.height, anchor.frame.width, anchor.frame.height), fallback: image)
         let flyer = UIImageView(image: full)
         flyer.contentMode = .scaleAspectFill
@@ -1230,25 +1236,23 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
         flyer.layer.cornerCurve = .continuous
         flyer.layer.cornerRadius = anchor.radius
         flyer.frame = anchor.frame
-        view.insertSubview(flyer, belowSubview: modeBar)
-        // 도착한 칸의 사진이 다르면(연도 대표 사진 등) 날아가는 동안 서서히 그 사진으로 바뀜 (도착 뒤 툭 바뀌지 않게)
+        view.insertSubview(flyer, belowSubview: titleOverlay.superview === view ? titleOverlay : modeBar)
         var sameCover = true
         if mode != .all, let cell = targetView.superview as? MomentCell { sameCover = cell.assetID == anchor.id }
         targetView.alpha = 0
-        let anim = UIViewPropertyAnimator(duration: 0.33, dampingRatio: 1) {
+        let anim = UIViewPropertyAnimator(duration: duration, dampingRatio: 1) {
             flyer.frame = target
             flyer.layer.cornerRadius = targetRadius
         }
-        if !sameCover {
-            anim.addAnimations({ flyer.alpha = 0; targetView.alpha = 1 }, delayFactor: 0.25)
-        }
-        anim.addCompletion { [weak self] _ in
-            if let self, let host = targetView.superview { flyer.frame = host.convert(host.bounds, to: self.view) }
+        // 뒤쪽에 도착 칸(글자·그림자·다른 대표 사진)이 서서히 겹쳐 드러남
+        anim.addAnimations({ flyer.alpha = sameCover ? 1 : 0; targetView.alpha = 1 }, delayFactor: 0.4)
+        anim.addCompletion { _ in
             targetView.alpha = 1
-            UIView.animate(withDuration: 0.08, animations: { flyer.alpha = 0 }, completion: { _ in flyer.removeFromSuperview() })
+            flyer.removeFromSuperview()
         }
         anim.startAnimation()
     }
+
 
     private func setLibraryMode(_ mode: LibraryMode, month: Int? = nil, onShown: (() -> Void)? = nil) {
         if mode == .all, moments != nil, usesNativeModeBar { customBarHold = true }
@@ -1865,6 +1869,9 @@ final class GridViewController: UIViewController, UICollectionViewDataSource, UI
 
     /// 화면을 바꾸는 순간에만 칸 그림을 그 자리에서 받음
     private var instantThumbs = false
+
+    /// 월 보기에서 마지막으로 보던 카드 사진 (년 → 월로 돌아올 때 그 달로)
+    private var lastMonthAnchorID: String?
 
     /// 한 화면에 다 들어와 스크롤할 수 없음 (탭 막대가 줄어들 일이 없음)
     private var shortContent: Bool {
