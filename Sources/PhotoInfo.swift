@@ -1149,6 +1149,9 @@ final class LocationSearchViewController: UITableViewController, UISearchBarDele
         searchBar.placeholder = "새로운 위치 입력"
         searchBar.searchBarStyle = .minimal
         searchBar.delegate = self
+        // 순정처럼 비어 있을 때 오른쪽에 마이크 (누르면 입력 시작, 받아쓰기는 키보드의 마이크)
+        searchBar.setImage(UIImage(systemName: "mic.fill"), for: .bookmark, state: .normal)
+        searchBar.showsBookmarkButton = true
         // 순정처럼 양옆 여백을 더 두고, 위아래에 가는 선
         let header = UIView(frame: CGRect(x: 0, y: 0, width: 393, height: 64))
         searchBar.translatesAutoresizingMaskIntoConstraints = false
@@ -1187,7 +1190,12 @@ final class LocationSearchViewController: UITableViewController, UISearchBarDele
         dismiss(animated: true)
     }
 
+    func searchBarBookmarkButtonClicked(_ searchBar: UISearchBar) {
+        searchBar.becomeFirstResponder()
+    }
+
     func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+        searchBar.showsBookmarkButton = searchText.isEmpty
         let text = searchText.trimmingCharacters(in: .whitespaces)
         if text.isEmpty {
             results = []
